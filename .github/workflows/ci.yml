@@ -33,3 +33,12 @@ jobs:
 
       - name: Unit tests
         run: uv run pytest
+
+      - name: Integration tests
+        run: uv run pytest -m integration
+
+      - name: Validate Compose file
+        run: docker compose --env-file .env.example config --quiet
+
+      - name: Build billing-api image
+        run: docker build --file lab/Dockerfile --tag supportops-billing-api:ci .

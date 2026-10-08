@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     )
 
     target: Literal["billing"] = "billing"
-    api_url: AnyHttpUrl = AnyHttpUrl("http://localhost:8000")
+    api_url: AnyHttpUrl = AnyHttpUrl("http://localhost:8001")
     api_key: SecretStr | None = None
     db_url: SecretStr | None = None
     http_timeout_seconds: float = Field(default=5.0, gt=0, le=300)

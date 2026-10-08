@@ -1,0 +1,42 @@
+name: supportops
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: billing
+      POSTGRES_USER: lab_admin
+      POSTGRES_PASSWORD: ${LAB_ADMIN_DB_PASSWORD:?Set LAB_ADMIN_DB_PASSWORD in .env}
+      BILLING_APP_DB_PASSWORD: ${BILLING_APP_DB_PASSWORD:?Set BILLING_APP_DB_PASSWORD in .env}
+      SUPPORTOPS_RO_DB_PASSWORD: ${SUPPORTOPS_RO_DB_PASSWORD:?Set SUPPORTOPS_RO_DB_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./lab/sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U lab_admin -d billing"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  billing-api:
+    build:
+      context: .
+      dockerfile: lab/Dockerfile
+    environment:
+      BILLING_ENV: lab
+      BILLING_DATABASE_URL: postgresql://billing_app:${BILLING_APP_DB_PASSWORD:?Set BILLING_APP_DB_PASSWORD in .env}@postgres:5432/billing
+    ports:
+      - "127.0.0.1:8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data:

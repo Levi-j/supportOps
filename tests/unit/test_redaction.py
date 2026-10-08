@@ -26,7 +26,7 @@ REDACTED_CASES = [
 UNCHANGED_CASES = [
     'password authentication failed for user "billing_app"',
     "request_id=inc001-cust-01 status=401 duration_ms=4",
-    "http://localhost:8000/v1/invoices?limit=3",
+    "http://localhost:8001/v1/invoices?limit=3",
     "postgresql://supportops_ro@localhost:5433/billing",
     "bk_wrong",
     "Bearer token expired",

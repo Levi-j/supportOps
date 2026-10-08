@@ -24,6 +24,7 @@ packages = ["src/supportops"]
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+src = [".", "src", "lab/src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "S", "PT", "RUF"]
@@ -33,8 +34,8 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "S", "PT", "RUF"]
 
 [tool.mypy]
 strict = true
-files = ["src", "tests"]
-mypy_path = "src"
+files = ["src", "lab/src", "tests"]
+mypy_path = ["src", "lab/src"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
@@ -52,7 +53,16 @@ markers = [
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.13.1",
     "mypy>=2.4.0",
     "pytest>=9.1.1",
     "ruff>=0.16.10",
+    "supportops-lab",
+    "testcontainers>=4.15.0",
 ]
+
+[tool.uv.workspace]
+members = ["lab"]
+
+[tool.uv.sources]
+supportops-lab = { workspace = true }
