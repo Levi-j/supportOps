@@ -11,9 +11,7 @@ The project also includes a small billing service and PostgreSQL database that r
 ### Requirements
 
 - [uv](https://docs.astral.sh/uv/) for managing Python and project dependencies
-
 - Git
-
 - [Docker](https://www.docker.com/products/docker-desktop/) for running the local lab and integration tests
 
 SupportOps uses Python 3.13. You don't need to install Python separately, as `uv` can download and manage the required version.
@@ -65,6 +63,8 @@ Using `uv run` means you don't have to activate the virtual environment yourself
 
 ## Using the CLI
 
+This section covers the basics. The diagnostics commands are described in [Diagnosing the API](#diagnosing-the-api), after the local lab they work against.
+
 ### Viewing configuration
 
 To see which settings SupportOps is currently using, run:
@@ -76,12 +76,22 @@ uv run supportops config show
 The output looks something like this:
 
 | Setting | Value | Source |
+
 |---|---|---|
+
 | SUPPORTOPS_TARGET | billing | env file |
-| SUPPORTOPS_API_URL | http://localhost:8001 | env file |
+
+| SUPPORTOPS_API_URL | http://127.0.0.1:8001/ | env file |
+
 | SUPPORTOPS_API_KEY | bk_juniper01*** | env file |
-| SUPPORTOPS_DB_URL | postgresql://supportops_ro:***@localhost:5433/billing | env file |
+
+| SUPPORTOPS_DB_URL | postgresql://supportops_ro:***@127.0.0.1:5433/billing | env file |
+
+| SUPPORTOPS_CONNECT_TIMEOUT_SECONDS | 3.0 | default |
+
 | SUPPORTOPS_HTTP_TIMEOUT_SECONDS | 5.0 | env file |
+
+| SUPPORTOPS_SLOW_REQUEST_MS | 1000.0 | default |
 
 Passwords and API keys are masked so they aren't accidentally exposed in terminal output. Database URLs still show useful details, such as the hostname, port, and username, but not the password.
 
@@ -100,10 +110,15 @@ This is useful when you want to process the output with another tool or script.
 ### Global options
 
 | Option | Description |
+
 |---|---|
+
 | `--help` | Show available commands and options |
+
 | `--version` | Display the installed version |
+
 | `--env-file PATH` | Load settings from a different environment file |
+
 | `--debug` | Display additional information when troubleshooting errors |
 
 Global options go before the command. For example:
@@ -119,14 +134,26 @@ SupportOps uses environment variables and an optional `.env` file for configurat
 The main settings are:
 
 | Variable | Default | Description |
+
 |---|---|---|
+
 | `SUPPORTOPS_TARGET` | `billing` | Type of service being investigated |
-| `SUPPORTOPS_API_URL` | `http://localhost:8001` | Base URL of the target API |
+
+| `SUPPORTOPS_API_URL` | `http://127.0.0.1:8001` | Base URL of the target API |
+
 | `SUPPORTOPS_API_KEY` | Not set | API key used for authentication |
-| `SUPPORTOPS_DB_URL` | Not set | PostgreSQL connection URL |
-| `SUPPORTOPS_HTTP_TIMEOUT_SECONDS` | `5` | Timeout for HTTP requests, in seconds |
+
+| `SUPPORTOPS_DB_URL` | Not set | PostgreSQL connection URL, used for a direct read-only database check |
+
+| `SUPPORTOPS_CONNECT_TIMEOUT_SECONDS` | `3` | How long to wait for a connection to open, in seconds |
+
+| `SUPPORTOPS_HTTP_TIMEOUT_SECONDS` | `5` | How long to wait for the API to respond once connected, in seconds |
+
+| `SUPPORTOPS_SLOW_REQUEST_MS` | `1000` | Response time above which `api latency` reports a problem, in milliseconds |
 
 The `.env.example` file also includes the database passwords used by the local Docker lab.
+
+The examples use `127.0.0.1` instead of `localhost` to avoid unnecessary IPv6 connection attempts on some Windows systems. If you created `.env` from an older example, update the host in `SUPPORTOPS_API_URL` and `SUPPORTOPS_DB_URL`. Keep your existing database password unchanged.
 
 Keep credentials in your environment or local configuration files rather than passing them directly as command-line arguments.
 
@@ -143,7 +170,6 @@ For example, if the API URL is invalid, you might see:
 ```text
 Error: Invalid configuration.
 SUPPORTOPS_API_URL: Input should be a valid URL.
-
 Hint: Fix the value in the environment or the env file,
 then run 'supportops config show'.
 ```
@@ -159,9 +185,15 @@ Sensitive values are masked in both normal and debug output.
 SupportOps uses exit codes to indicate whether a command succeeded:
 
 | Code | Meaning |
+
 |---|---|
-| `0` | Command completed successfully |
-| `2` | Invalid command usage or configuration |
+
+| `0` | Command completed successfully, and no problem was found |
+
+| `1` | The command ran, but found a problem, such as an unhealthy service or an error response |
+
+| `2` | Invalid command usage or configuration, including refused write requests |
+
 | `3` | An unexpected error occurred |
 
 These codes are useful when running SupportOps from scripts or automated workflows.
@@ -213,13 +245,16 @@ docker compose ps
 The services are available at:
 
 | Service | Address |
+
 |---|---|
+
 | Billing API | http://localhost:8001 |
+
 | PostgreSQL | `localhost:5433` |
 
-Both ports are bound to `127.0.0.1`, so the services aren't exposed to other machines on your network.
+Both ports are bound to `127.0.0.1`, so the services aren't exposed to other machines on your network. You can use either `localhost` or `127.0.0.1` in your browser and with curl, but SupportOps uses `127.0.0.1` because it connects faster on Windows (see [Configuration](#configuration)).
 
-The billing API uses port 8000 inside its Docker container, but Docker makes it available on port **8001** on your computer. This avoids a conflict with OrderFlow, which uses port 8000.
+The billing API listens on port 8000 inside its container and is available on port **8001** on the host. The separate host port helps avoid conflicts with other local services.
 
 You can explore the API's interactive documentation here:
 
@@ -248,8 +283,11 @@ On Windows PowerShell, using `curl.exe` makes sure you're calling curl rather th
 The two endpoints check different things:
 
 | Endpoint | Purpose | Checks PostgreSQL? |
+
 |---|---|---|
+
 | `GET /health` | Confirms the API process is running | No |
+
 | `GET /health/ready` | Confirms the API can reach its database | Yes |
 
 The difference matters when troubleshooting.
@@ -349,9 +387,13 @@ The error code helps identify what went wrong, and the request ID gives you a wa
 The lab uses separate PostgreSQL users instead of connecting everything with an administrator account.
 
 | User | Purpose | Permissions |
+
 |---|---|---|
+
 | `lab_admin` | Initial database setup | Superuser |
+
 | `billing_app` | Billing API database access | Read, insert, and update billing data |
+
 | `supportops_ro` | SupportOps diagnostics | Read-only access and PostgreSQL monitoring views |
 
 The `billing_app` user cannot delete records or change the database schema.
@@ -465,10 +507,15 @@ The API is available at [http://localhost:8001/docs](http://localhost:8001/docs)
 The sample database includes these keys:
 
 | Key | Account | Status |
+
 |---|---|---|
+
 | `bk_juniper01_lab_only_not_a_real_key` | Juniper Dental Group | Active |
+
 | `bk_juniper00_lab_only_not_a_real_key` | Juniper Dental Group | Revoked |
+
 | `bk_kestrel01_lab_only_not_a_real_key` | Kestrel Logistics | Active |
+
 | `bk_alderfin1_lab_only_not_a_real_key` | Alder & Finch Studio | Account suspended |
 
 These are public test credentials for a local lab, not secrets for a real service. `.env.example` uses the active Juniper key. If you created `.env` during M2, compare the two files and update `SUPPORTOPS_API_KEY` in your local `.env` when you want to use the CLI with authenticated requests.
@@ -488,14 +535,23 @@ A missing, malformed, unknown, revoked, or expired key always gets the same `401
 ### Available endpoints
 
 | Method | Endpoint | What it does |
+
 |---|---|---|
+
 | `GET` | `/v1/account` | Identifies the account associated with the API key |
+
 | `GET` | `/v1/customers` | Lists customers with `limit` and `offset` |
+
 | `POST` | `/v1/customers` | Creates a customer |
+
 | `GET` | `/v1/customers/{id}` | Retrieves one customer |
+
 | `GET` | `/v1/invoices` | Lists invoices, with status, customer, and pagination filters |
+
 | `POST` | `/v1/invoices` | Creates an invoice from line items |
+
 | `GET` | `/v1/invoices/{id}` | Retrieves an invoice and its lines |
+
 | `POST` | `/v1/invoices/{id}/pay` | Pays an open invoice in full |
 
 List endpoints return results in a `data` array, along with `has_more` to indicate whether another page is available.
@@ -506,7 +562,6 @@ List endpoints return results in a `data` array, along with `has_more` to indica
 
 ```powershell
 $key = "bk_juniper01_lab_only_not_a_real_key"
-
 curl.exe -s -H "Authorization: Bearer $key" http://localhost:8001/v1/account
 curl.exe -s -H "Authorization: Bearer $key" "http://localhost:8001/v1/invoices?status=open"
 ```
@@ -515,7 +570,6 @@ curl.exe -s -H "Authorization: Bearer $key" "http://localhost:8001/v1/invoices?s
 
 ```bash
 key="bk_juniper01_lab_only_not_a_real_key"
-
 curl -s -H "Authorization: Bearer $key" http://localhost:8001/v1/account
 curl -s -H "Authorization: Bearer $key" "http://localhost:8001/v1/invoices?status=open"
 ```
@@ -532,7 +586,7 @@ curl.exe -s -X POST -H "Authorization: Bearer $key" -H "Content-Type: applicatio
 **Linux/macOS:**
 
 ```bash
-curl -s -X POST -H "Authorization: Bearer $key" -H "Content-Type: application/json" \
+curl -s -X POST -H "Authorization: Bearer $key" -H "Content-Type: application/json" \\
   --data-binary "@docs/examples/new-customer.json" http://localhost:8001/v1/customers
 ```
 
@@ -571,15 +625,25 @@ If another transaction holds the row lock too long, the API returns `503 DATABAS
 Errors follow the [RFC 9457 Problem Details](https://www.rfc-editor.org/rfc/rfc9457) format described above, including a request ID you can look up in the logs.
 
 | HTTP status | Code | Meaning |
+
 |---|---|---|
+
 | `400` | `MALFORMED_REQUEST` | The request body isn't valid JSON |
+
 | `401` | `UNAUTHENTICATED` | The key is missing or invalid |
+
 | `403` | `ACCOUNT_SUSPENDED` | The account isn't allowed to make requests |
+
 | `404` | `RESOURCE_NOT_FOUND` | The requested resource isn't available to this account |
+
 | `409` | `INVOICE_NOT_PAYABLE` | The invoice can't be paid in its current state |
+
 | `422` | `VALIDATION_FAILED` | A field is missing, invalid, or not supported |
+
 | `500` | `INTERNAL_ERROR` | An unexpected server error occurred |
+
 | `503` | `SERVICE_UNAVAILABLE` | A required dependency, such as PostgreSQL, is unavailable |
+
 | `503` | `DATABASE_BUSY` | A database operation timed out, including lock contention |
 
 The distinction between `400` and `422` is useful when helping someone debug an integration. A `400` means the body couldn't be parsed as JSON. A `422` means the JSON itself was valid, but didn't match the endpoint's expected fields.
@@ -600,14 +664,23 @@ The first should return `400 MALFORMED_REQUEST`; the second should return `422 V
 In addition to the access log, the API records events for authentication failures, invalid requests, business operations, and database problems.
 
 | Event | What to look for |
+
 |---|---|
+
 | `auth.rejected` | Why a key was rejected, plus its safe prefix |
+
 | `request.invalid_json` | JSON parsing error and position, without the body |
+
 | `request.validation_failed` | Which fields failed validation |
+
 | `customer.created` / `invoice.created` | IDs of newly created records |
+
 | `payment.recorded` / `invoice.paid` | Successful payment processing |
+
 | `payment.rejected` | An invoice couldn't be paid |
+
 | `db.unavailable` | Connection or dependency failure |
+
 | `db.lock_timeout` / `db.statement_timeout` | A database operation timed out |
 
 Authenticated request logs include an `account_id`, so you can narrow an investigation to one account. Each request also has an `X-Request-Id` that ties its response to the related events.
@@ -639,11 +712,9 @@ You can also try it in the running lab. **Use a newly created invoice, not one o
 ```powershell
 $env:BILLING_FAULTS = "payment_partial_commit"
 docker compose up -d --wait billing-api
-
 $key = "bk_juniper01_lab_only_not_a_real_key"
 $invoice = curl.exe -s -X POST -H "Authorization: Bearer $key" -H "Content-Type: application/json" `
   --data-binary "@docs/examples/new-invoice.json" http://localhost:8001/v1/invoices | ConvertFrom-Json
-
 curl.exe -i -X POST -H "Authorization: Bearer $key" http://localhost:8001/v1/invoices/$($invoice.id)/pay
 curl.exe -i -X POST -H "Authorization: Bearer $key" http://localhost:8001/v1/invoices/$($invoice.id)/pay
 curl.exe -s -H "Authorization: Bearer $key" http://localhost:8001/v1/invoices/$($invoice.id)
@@ -661,6 +732,118 @@ docker compose up -d --wait billing-api
 Removing the environment variable alone doesn't change a container that's already running. The second command recreates the API with the fault disabled. It does not reset the database.
 
 If you want to remove the extra lab records, use the [reset procedure](#resetting-the-lab) after confirming that you don't need any data in the SupportOps database volume.
+
+## Diagnosing the API
+
+SupportOps provides three commands for day-to-day API troubleshooting: `health` checks availability, `api request` reproduces a call, and `api latency` measures response times. The examples below use the local billing lab. Start it first and make sure your `.env` points to the running service.
+
+The CLI assigns an `X-Request-Id` to each HTTP request and shows it in the result. That gives you a reliable way to find the corresponding server logs.
+
+### Check service availability
+
+```bash
+uv run supportops health
+```
+
+This checks the API's liveness (`/health`) and readiness (`/health/ready`) endpoints, then connects directly to PostgreSQL using a read-only account. Checking both paths to the database helps narrow down the cause of an outage.
+
+| Verdict | Interpretation |
+|---|---|
+| `HEALTHY` | The API is live, ready, and able to use PostgreSQL. |
+| `DEGRADED` | The API is running, but a dependency or readiness check has failed. |
+| `DOWN` | The API cannot be reached. |
+| `INCONCLUSIVE` | The checks returned insufficient or conflicting evidence. |
+
+For example, if the API cannot reach PostgreSQL but SupportOps can connect directly, the API's configuration or network path deserves investigation. If both connections fail, a database outage is more likely. These are diagnostic clues, not automatic root-cause conclusions.
+
+The output includes the result and duration of each check, relevant request IDs, and suggested next steps. The command does not change database records. It returns exit code `0` for `HEALTHY` and a nonzero code otherwise.
+
+For scripts, use the JSON output:
+
+```bash
+uv run supportops health --json
+```
+
+See the [service availability runbook](docs/runbooks/service-availability.md) for a safe, supervised database-outage exercise.
+
+### Reproduce an API request
+
+```bash
+uv run supportops api request GET /v1/account
+```
+
+SupportOps displays the HTTP status, elapsed time, request ID, relevant response headers, and response body. It interprets RFC 9457 Problem Details errors and offers a next step where possible. Credentials are masked in the output.
+
+To investigate a missing-key response, send the request without authentication and give it a recognizable ID:
+
+```bash
+uv run supportops api request GET /v1/account --no-auth --request-id demo-auth-401
+```
+
+The API should return `401 UNAUTHENTICATED`. You can then find `demo-auth-401` in the billing API's logs to see the internal rejection reason. The caller receives the generic error, while the server log contains the troubleshooting detail.
+
+The most useful options are:
+
+| Option | Purpose |
+|---|---|
+| `--request-id ID` | Supply a correlation ID instead of having one generated. |
+| `--key-env NAME` | Read an API key from a named environment variable. |
+| `--no-auth` | Omit the Authorization header. |
+| `--data-file PATH` / `--data JSON` | Provide a request body, validated as JSON before sending. |
+| `--raw` | Send the supplied body without JSON validation to reproduce malformed requests. |
+| `--header "Name: value"` | Add a non-credential request header. |
+| `--full` | Display more than the default 4,000-character response limit. |
+| `--json` | Return machine-readable diagnostic output. |
+| `--yes` | Explicitly approve a state-changing request against the local lab. |
+
+API keys are read from configuration or environment variables rather than command-line arguments. Requests do not follow redirects automatically, so the reported response is the one the target API actually returned.
+
+If inline JSON is malformed, SupportOps stops before sending it. This is particularly helpful on Windows PowerShell 5.1, where quoting JSON passed to native commands can be unreliable. Using `--data-file` is usually simpler.
+
+### Make changes in the lab safely
+
+SupportOps is primarily a diagnostic tool. A `POST`, `PUT`, `PATCH`, or `DELETE` request is allowed only when all three conditions are met:
+
+1. You include `--yes`.
+2. The target points to the local machine (`127.0.0.1`, `localhost`, or `::1`).
+3. The service's `/health` response identifies the environment as `lab`.
+
+The local-address and confirmation checks happen before sending the request. If the conditions are not met, SupportOps refuses the operation. It never automatically retries writes: after a timeout, you should check whether the original request succeeded before trying again.
+
+For example, the following command **creates a customer in your local database**:
+
+```bash
+uv run supportops api request POST /v1/customers --data-file docs/examples/new-customer.json --yes
+```
+
+Leave out `--yes` when you only want to confirm that the safety guard works; the request will be rejected without creating anything.
+
+### Measure response times
+
+```bash
+uv run supportops api latency /v1/invoices --count 20
+```
+
+This sends 20 sequential `GET` requests and reports the status-code distribution, median (`p50`), 95th-percentile (`p95`) and maximum response time. It also identifies the slowest requests by their IDs.
+
+An example summary might look like:
+
+```text
+Responses: 200 x20
+Successful: 20 of 20   p50 11.8 ms   p95 13.5 ms   max 18.2 ms
+All requests succeeded within the threshold.
+```
+
+The times will depend on your machine and network. By default, the threshold is set by `SUPPORTOPS_SLOW_REQUEST_MS` (1,000 ms); you can override it with `--threshold-ms`. The command returns exit code `1` if a request fails, returns a non-2xx status, or the p95 exceeds the threshold.
+
+Requests are sent one at a time, with a maximum count of 100. This is intended for lightweight troubleshooting, not load testing. On Windows, an unusually slow first request can also be caused by connection setup rather than the API itself.
+
+### Troubleshooting runbooks
+
+The runbooks provide fuller procedures, including PowerShell and Linux examples:
+
+- [Service availability](docs/runbooks/service-availability.md) covers the health verdicts, connection failures, and a supervised PostgreSQL outage drill.
+- [API errors and reproduction](docs/runbooks/api-errors-and-reproduction.md) covers HTTP errors, request IDs, malformed JSON, safe requests, and latency checks.
 
 ## Development
 
@@ -700,6 +883,8 @@ Tests that call the billing API get their own fresh copy of the sample database,
 
 This lets the tests verify database roles, permissions, sample data, authentication, tenant isolation, payments, lock timeouts, and the lab fault without relying on the state of your running lab.
 
+Integration tests also start the billing API on a temporary local port and exercise the diagnostics against it. This checks the CLI's behavior with a real API and PostgreSQL without using your running lab.
+
 ### Code quality checks
 
 Run Ruff's linting checks:
@@ -730,6 +915,12 @@ The CI workflow also runs PostgreSQL integration tests, validates the Docker Com
 src/
 └── supportops/             # Main SupportOps CLI
     ├── cli/                # Commands and CLI entry points
+    ├── db/                 # Read-only PostgreSQL connection check
+    ├── health.py           # Service health checks and verdicts
+    ├── http_checks.py      # Diagnostic HTTP requests and failure classification
+    ├── latency.py          # Response-time measurement
+    ├── write_guard.py      # Safety checks for requests that change data
+    ├── targets.py          # Health, readiness and authentication details of each service
     ├── settings.py         # Configuration loading and validation
     ├── redaction.py        # Masking passwords and other sensitive data
     ├── render.py           # Terminal and JSON output
@@ -749,7 +940,8 @@ lab/
         ├── faults.py       # Lab-only fault injection
         └── ...             # Settings, logging, middleware, health checks
 docs/
-└── examples/               # Example JSON request bodies
+├── examples/               # Example JSON request bodies
+└── runbooks/               # Step-by-step troubleshooting guides
 tests/
 ├── unit/                   # CLI and API unit tests
 └── integration/            # PostgreSQL and API integration tests
@@ -764,10 +956,10 @@ The billing API opens a database connection for each request rather than using a
 
 The API's Docker image is built to include only the packages the service needs, and the application runs inside the container as a non-root user.
 
-## Next builds
+## Next build
 
-The CLI foundation and local billing service are in place, including authenticated accounts, customers, invoices, payments, request tracing, and a lab-only payment fault.
+The billing lab and the first diagnostic commands are now in place. SupportOps can check service health, reproduce API requests with request IDs, and measure latency without needing a full monitoring stack.
 
-Next comes the main purpose of SupportOps: building the CLI diagnostics that investigate the service. These will cover API health, authentication issues, structured logs, PostgreSQL checks, and eventually guided incident investigations.
+The next stages will add structured log analysis, more detailed PostgreSQL and authentication checks, and guided incident investigations.
 
 The goal is to build a tool that doesn't just report that something failed, but helps explain **what failed, where to look, and what might have caused it**.

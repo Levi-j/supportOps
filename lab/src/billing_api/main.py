@@ -22,7 +22,7 @@ def create_app(
     check_database: Callable[[], DatabaseStatus] | None = None,
 ) -> FastAPI:
     settings = settings or _load_settings_or_log()
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, secrets=database.credentials(settings))
     checker = check_database or partial(database.check_database, settings)
     app_version = version("supportops-lab")
     faults = sorted(settings.faults)

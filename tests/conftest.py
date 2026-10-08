@@ -9,6 +9,15 @@ from tests.log_capture import JsonCapture
 
 
 @pytest.fixture(autouse=True)
+def restore_root_logger() -> Iterator[None]:
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    yield
+    root.handlers[:] = handlers
+    root.setLevel(level)
+
+
+@pytest.fixture(autouse=True)
 def isolated_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     for name in list(os.environ):
         if name.upper().startswith("SUPPORTOPS_"):

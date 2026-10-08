@@ -6,7 +6,7 @@ import typer
 from typer.core import TyperGroup
 
 from supportops import __version__, render
-from supportops.cli import config
+from supportops.cli import api, config, health
 from supportops.cli.state import AppState
 from supportops.errors import ExitCode, SupportOpsError
 
@@ -40,6 +40,8 @@ app = typer.Typer(
     pretty_exceptions_enable=False,
 )
 app.add_typer(config.app, name="config")
+app.add_typer(api.app, name="api")
+app.command("health")(health.health)
 
 
 def _show_version(value: bool) -> None:

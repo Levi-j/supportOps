@@ -19,7 +19,7 @@ def test_defaults_apply_without_env_file() -> None:
 
     assert loaded.env_file is None
     assert loaded.settings.target == "billing"
-    assert str(loaded.settings.api_url) == "http://localhost:8001/"
+    assert str(loaded.settings.api_url) == "http://127.0.0.1:8001/"
     assert loaded.settings.api_key is None
     assert loaded.settings.db_url is None
     assert loaded.settings.http_timeout_seconds == 5.0

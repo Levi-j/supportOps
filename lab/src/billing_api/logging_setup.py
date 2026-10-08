@@ -1,11 +1,13 @@
 import json
 import logging
 import sys
+from collections.abc import Iterable
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
 
 SERVICE_NAME = "billing-api"
+MASK = "***"
 
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 
@@ -15,6 +17,10 @@ _STANDARD_ATTRIBUTES = frozenset(
 
 
 class JsonFormatter(logging.Formatter):
+    def __init__(self, secrets: Iterable[str] = ()) -> None:
+        super().__init__()
+        self.secrets = sorted({secret for secret in secrets if secret}, key=len, reverse=True)
+
     def format(self, record: logging.LogRecord) -> str:
         timestamp = datetime.fromtimestamp(record.created, tz=UTC)
         entry: dict[str, Any] = {
@@ -34,7 +40,19 @@ class JsonFormatter(logging.Formatter):
             entry["error_type"] = record.exc_info[0].__name__
             entry["error_message"] = str(record.exc_info[1])
             entry["stack_trace"] = self.formatException(record.exc_info)
-        return json.dumps(entry, default=str)
+        return json.dumps(self._hide_secrets(entry))
+
+    def _hide_secrets(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: self._hide_secrets(item) for key, item in value.items()}
+        if isinstance(value, list | tuple):
+            return [self._hide_secrets(item) for item in value]
+        if value is None or isinstance(value, bool | int | float):
+            return value
+        text = str(value)
+        for secret in self.secrets:
+            text = text.replace(secret, MASK)
+        return text
 
 
 class JsonLogHandler(logging.Handler):
@@ -46,12 +64,12 @@ class JsonLogHandler(logging.Handler):
             self.handleError(record)
 
 
-def configure_logging(level: str) -> None:
+def configure_logging(level: str, secrets: Iterable[str] = ()) -> None:
     root = logging.getLogger()
     for handler in [h for h in root.handlers if isinstance(h, JsonLogHandler)]:
         root.removeHandler(handler)
     handler = JsonLogHandler()
-    handler.setFormatter(JsonFormatter())
+    handler.setFormatter(JsonFormatter(secrets))
     root.addHandler(handler)
     root.setLevel(level)
     for name in ("uvicorn", "uvicorn.error"):

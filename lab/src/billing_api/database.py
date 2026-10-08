@@ -1,7 +1,9 @@
+import contextlib
 import logging
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any
+from urllib.parse import urlsplit
 
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
@@ -38,6 +40,14 @@ def connect(settings: BillingSettings) -> Connection:
     return psycopg.connect(
         settings.database_url.get_secret_value(), autocommit=True, **connection_kwargs(settings)
     )
+
+
+def credentials(settings: BillingSettings) -> frozenset[str]:
+    url = settings.database_url.get_secret_value()
+    values = {str(conninfo_to_dict(url).get("password") or "")}
+    with contextlib.suppress(ValueError):
+        values.add(urlsplit(url).password or "")
+    return frozenset(value for value in values if value)
 
 
 def describe_target(settings: BillingSettings) -> dict[str, str]:

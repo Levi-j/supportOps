@@ -26,10 +26,12 @@ class Settings(BaseSettings):
     )
 
     target: Literal["billing"] = "billing"
-    api_url: AnyHttpUrl = AnyHttpUrl("http://localhost:8001")
+    api_url: AnyHttpUrl = AnyHttpUrl("http://127.0.0.1:8001")
     api_key: SecretStr | None = None
     db_url: SecretStr | None = None
+    connect_timeout_seconds: float = Field(default=3.0, gt=0, le=60)
     http_timeout_seconds: float = Field(default=5.0, gt=0, le=300)
+    slow_request_ms: float = Field(default=1000.0, gt=0, le=600_000)
 
     @field_validator("db_url")
     @classmethod

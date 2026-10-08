@@ -1,5 +1,7 @@
 from typing import Annotated, Literal, Self
 
+import psycopg
+from psycopg.conninfo import conninfo_to_dict
 from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
@@ -24,8 +26,14 @@ class BillingSettings(BaseSettings):
     @field_validator("database_url")
     @classmethod
     def _require_postgres_url(cls, value: SecretStr) -> SecretStr:
-        if not value.get_secret_value().startswith(("postgresql://", "postgres://")):
+        url = value.get_secret_value()
+        if not url.startswith(("postgresql://", "postgres://")):
             raise ValueError("must be a PostgreSQL URL")
+        if not _parses(url):
+            raise ValueError(
+                "could not be parsed; percent-encode special characters in the password "
+                "(for example % as %25 and @ as %40)"
+            )
         return value
 
     @field_validator("faults", mode="before")
@@ -40,6 +48,14 @@ class BillingSettings(BaseSettings):
         if self.faults and self.env != "lab":
             raise ValueError("BILLING_FAULTS can only be enabled when BILLING_ENV=lab")
         return self
+
+
+def _parses(url: str) -> bool:
+    try:
+        conninfo_to_dict(url)
+    except psycopg.Error:
+        return False
+    return True
 
 
 def load_settings() -> BillingSettings:
