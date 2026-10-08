@@ -1,10 +1,12 @@
 import json
+import re
 import shutil
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+from typer import rich_utils
 from typer.testing import CliRunner, Result
 
 from supportops.cli.main import app
@@ -14,6 +16,7 @@ FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "logs"
 BILLING = str(FIXTURES / "billing-api.jsonl")
 SECRETS = str(FIXTURES / "planted-secrets.jsonl")
 DOCKER = "/usr/bin/docker"
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 PLANTED_VALUES = [
     "Planted",
     "bk_planted0001_fake_secret_value",
@@ -54,6 +57,10 @@ def flat(text: str) -> str:
     return " ".join(text.split())
 
 
+def plain(text: str) -> str:
+    return ANSI_ESCAPE.sub("", text)
+
+
 @pytest.mark.parametrize(
     ("args", "expected"),
     [
@@ -66,12 +73,19 @@ def flat(text: str) -> str:
         (["logs", "trace", "--help"], ["REQUEST_ID", "SUPPORTOPS_LOG_SOURCE"]),
     ],
 )
-def test_help_describes_the_commands(args: list[str], expected: list[str]) -> None:
+@pytest.mark.parametrize("styled", [False, True], ids=["plain", "styled"])
+def test_help_describes_the_commands(
+    monkeypatch: pytest.MonkeyPatch, args: list[str], expected: list[str], styled: bool
+) -> None:
+    monkeypatch.setattr(rich_utils, "FORCE_TERMINAL", styled)
+
     result = invoke(*args)
 
+    help_text = plain(result.stdout).lower()
     assert result.exit_code == 0
+    assert ("\x1b[" in result.stdout) is styled
     for text in expected:
-        assert text.lower() in result.stdout.lower()
+        assert text.lower() in help_text
 
 
 def test_summary_text_output() -> None:
