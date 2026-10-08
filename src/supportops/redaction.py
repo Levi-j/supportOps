@@ -1,4 +1,5 @@
 import re
+from typing import Any
 
 MASK = "***"
 API_KEY_PREFIX = "bk_"
@@ -13,13 +14,24 @@ _AUTHORIZATION = re.compile(
     r"(?i)\b(?P<head>authorization\s*[:=]\s*)(?!(?:bearer|basic)\s)(?P<token>[^\s,;\"']+)"
 )
 _API_KEY = re.compile(r"\bbk_[A-Za-z0-9_]{10,}")
+SECRET_NAME_WORDS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+)
+
 _JSON_SECRET = re.compile(
-    r"(?i)(?P<head>\"(?:password|passwd|secret|client_secret|token|access_token|refresh_token"
-    r"|api_key|apikey|authorization)\"\s*:\s*\")(?P<value>[^\"]*)(?P<tail>\")"
+    r"(?i)(?P<head>\"[A-Za-z0-9_.-]*(?:password|passwd|secret|token|api_key|apikey"
+    r"|authorization|cookie)[A-Za-z0-9_.-]*\"\s*:\s*\")(?P<value>[^\"]*)(?P<tail>\")"
 )
 _KEY_VALUE_SECRET = re.compile(
-    r"(?i)\b(?P<head>[A-Za-z0-9_]*(?:password|passwd|secret|token|api_key|apikey)[A-Za-z0-9_]*"
-    r"\s*[=:]\s*)(?P<value>[^\s,;&\"']+)"
+    r"(?i)\b(?P<head>[A-Za-z0-9_]*(?:password|passwd|secret|token|api_key|apikey|cookie)"
+    r"[A-Za-z0-9_]*'?\s*[=:]\s*'?)(?P<value>[^\s,;&\"']+)"
 )
 _EMAIL = re.compile(
     r"\b(?P<first>[A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@"
@@ -51,3 +63,21 @@ def redact_text(text: str) -> str:
     text = _JSON_SECRET.sub(lambda m: f"{m['head']}{MASK}{m['tail']}", text)
     text = _KEY_VALUE_SECRET.sub(lambda m: f"{m['head']}{MASK}", text)
     return _EMAIL.sub(lambda m: f"{m['first']}{MASK}@{m['domain']}", text)
+
+
+def is_secret_name(name: str) -> bool:
+    lowered = name.lower().replace("-", "_")
+    return any(word in lowered for word in SECRET_NAME_WORDS)
+
+
+def redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, list):
+        return [redact_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: MASK if isinstance(item, str) and is_secret_name(str(key)) else redact_value(item)
+            for key, item in value.items()
+        }
+    return value

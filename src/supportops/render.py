@@ -1,5 +1,4 @@
 import json
-from typing import Any
 
 import typer
 from pydantic import BaseModel
@@ -8,7 +7,7 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
-from supportops.redaction import redact_text
+from supportops.redaction import redact_text, redact_value
 
 
 def _console(*, stderr: bool = False) -> Console:
@@ -16,18 +15,8 @@ def _console(*, stderr: bool = False) -> Console:
 
 
 def emit_json(model: BaseModel) -> None:
-    data = _redact_values(model.model_dump(mode="json"))
+    data = redact_value(model.model_dump(mode="json"))
     typer.echo(redact_text(json.dumps(data, indent=2, ensure_ascii=False)))
-
-
-def _redact_values(value: Any) -> Any:
-    if isinstance(value, str):
-        return redact_text(value)
-    if isinstance(value, list):
-        return [_redact_values(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _redact_values(item) for key, item in value.items()}
-    return value
 
 
 def emit_line(text: str = "", style: str | None = None) -> None:

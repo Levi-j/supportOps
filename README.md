@@ -11,7 +11,9 @@ The project also includes a small billing service and PostgreSQL database that r
 ### Requirements
 
 - [uv](https://docs.astral.sh/uv/) for managing Python and project dependencies
+
 - Git
+
 - [Docker](https://www.docker.com/products/docker-desktop/) for running the local lab and integration tests
 
 SupportOps uses Python 3.13. You don't need to install Python separately, as `uv` can download and manage the required version.
@@ -76,22 +78,15 @@ uv run supportops config show
 The output looks something like this:
 
 | Setting | Value | Source |
-
 |---|---|---|
-
 | SUPPORTOPS_TARGET | billing | env file |
-
 | SUPPORTOPS_API_URL | http://127.0.0.1:8001/ | env file |
-
 | SUPPORTOPS_API_KEY | bk_juniper01*** | env file |
-
 | SUPPORTOPS_DB_URL | postgresql://supportops_ro:***@127.0.0.1:5433/billing | env file |
-
 | SUPPORTOPS_CONNECT_TIMEOUT_SECONDS | 3.0 | default |
-
 | SUPPORTOPS_HTTP_TIMEOUT_SECONDS | 5.0 | env file |
-
 | SUPPORTOPS_SLOW_REQUEST_MS | 1000.0 | default |
+| SUPPORTOPS_LOG_SOURCE | docker:supportops-billing-api-1 | env file |
 
 Passwords and API keys are masked so they aren't accidentally exposed in terminal output. Database URLs still show useful details, such as the hostname, port, and username, but not the password.
 
@@ -110,15 +105,10 @@ This is useful when you want to process the output with another tool or script.
 ### Global options
 
 | Option | Description |
-
 |---|---|
-
 | `--help` | Show available commands and options |
-
 | `--version` | Display the installed version |
-
 | `--env-file PATH` | Load settings from a different environment file |
-
 | `--debug` | Display additional information when troubleshooting errors |
 
 Global options go before the command. For example:
@@ -134,22 +124,15 @@ SupportOps uses environment variables and an optional `.env` file for configurat
 The main settings are:
 
 | Variable | Default | Description |
-
 |---|---|---|
-
 | `SUPPORTOPS_TARGET` | `billing` | Type of service being investigated |
-
 | `SUPPORTOPS_API_URL` | `http://127.0.0.1:8001` | Base URL of the target API |
-
 | `SUPPORTOPS_API_KEY` | Not set | API key used for authentication |
-
 | `SUPPORTOPS_DB_URL` | Not set | PostgreSQL connection URL, used for a direct read-only database check |
-
 | `SUPPORTOPS_CONNECT_TIMEOUT_SECONDS` | `3` | How long to wait for a connection to open, in seconds |
-
 | `SUPPORTOPS_HTTP_TIMEOUT_SECONDS` | `5` | How long to wait for the API to respond once connected, in seconds |
-
 | `SUPPORTOPS_SLOW_REQUEST_MS` | `1000` | Response time above which `api latency` reports a problem, in milliseconds |
+| `SUPPORTOPS_LOG_SOURCE` | `docker:supportops-billing-api-1` | Where the `logs` commands read from when no source is given |
 
 The `.env.example` file also includes the database passwords used by the local Docker lab.
 
@@ -185,16 +168,11 @@ Sensitive values are masked in both normal and debug output.
 SupportOps uses exit codes to indicate whether a command succeeded:
 
 | Code | Meaning |
-
 |---|---|
-
-| `0` | Command completed successfully, and no problem was found |
-
-| `1` | The command ran, but found a problem, such as an unhealthy service or an error response |
-
+| `0` | Command completed successfully |
+| `1` | The command ran, but found a problem or found nothing, such as an unhealthy service, an error response, or no matching log entries |
 | `2` | Invalid command usage or configuration, including refused write requests |
-
-| `3` | An unexpected error occurred |
+| `3` | The command couldn't finish, for example because a log source couldn't be read, or an unexpected error occurred |
 
 These codes are useful when running SupportOps from scripts or automated workflows.
 
@@ -245,11 +223,8 @@ docker compose ps
 The services are available at:
 
 | Service | Address |
-
 |---|---|
-
 | Billing API | http://localhost:8001 |
-
 | PostgreSQL | `localhost:5433` |
 
 Both ports are bound to `127.0.0.1`, so the services aren't exposed to other machines on your network. You can use either `localhost` or `127.0.0.1` in your browser and with curl, but SupportOps uses `127.0.0.1` because it connects faster on Windows (see [Configuration](#configuration)).
@@ -283,11 +258,8 @@ On Windows PowerShell, using `curl.exe` makes sure you're calling curl rather th
 The two endpoints check different things:
 
 | Endpoint | Purpose | Checks PostgreSQL? |
-
 |---|---|---|
-
 | `GET /health` | Confirms the API process is running | No |
-
 | `GET /health/ready` | Confirms the API can reach its database | Yes |
 
 The difference matters when troubleshooting.
@@ -387,13 +359,9 @@ The error code helps identify what went wrong, and the request ID gives you a wa
 The lab uses separate PostgreSQL users instead of connecting everything with an administrator account.
 
 | User | Purpose | Permissions |
-
 |---|---|---|
-
 | `lab_admin` | Initial database setup | Superuser |
-
 | `billing_app` | Billing API database access | Read, insert, and update billing data |
-
 | `supportops_ro` | SupportOps diagnostics | Read-only access and PostgreSQL monitoring views |
 
 The `billing_app` user cannot delete records or change the database schema.
@@ -507,15 +475,10 @@ The API is available at [http://localhost:8001/docs](http://localhost:8001/docs)
 The sample database includes these keys:
 
 | Key | Account | Status |
-
 |---|---|---|
-
 | `bk_juniper01_lab_only_not_a_real_key` | Juniper Dental Group | Active |
-
 | `bk_juniper00_lab_only_not_a_real_key` | Juniper Dental Group | Revoked |
-
 | `bk_kestrel01_lab_only_not_a_real_key` | Kestrel Logistics | Active |
-
 | `bk_alderfin1_lab_only_not_a_real_key` | Alder & Finch Studio | Account suspended |
 
 These are public test credentials for a local lab, not secrets for a real service. `.env.example` uses the active Juniper key. If you created `.env` during M2, compare the two files and update `SUPPORTOPS_API_KEY` in your local `.env` when you want to use the CLI with authenticated requests.
@@ -535,23 +498,14 @@ A missing, malformed, unknown, revoked, or expired key always gets the same `401
 ### Available endpoints
 
 | Method | Endpoint | What it does |
-
 |---|---|---|
-
 | `GET` | `/v1/account` | Identifies the account associated with the API key |
-
 | `GET` | `/v1/customers` | Lists customers with `limit` and `offset` |
-
 | `POST` | `/v1/customers` | Creates a customer |
-
 | `GET` | `/v1/customers/{id}` | Retrieves one customer |
-
 | `GET` | `/v1/invoices` | Lists invoices, with status, customer, and pagination filters |
-
 | `POST` | `/v1/invoices` | Creates an invoice from line items |
-
 | `GET` | `/v1/invoices/{id}` | Retrieves an invoice and its lines |
-
 | `POST` | `/v1/invoices/{id}/pay` | Pays an open invoice in full |
 
 List endpoints return results in a `data` array, along with `has_more` to indicate whether another page is available.
@@ -586,7 +540,7 @@ curl.exe -s -X POST -H "Authorization: Bearer $key" -H "Content-Type: applicatio
 **Linux/macOS:**
 
 ```bash
-curl -s -X POST -H "Authorization: Bearer $key" -H "Content-Type: application/json" \\
+curl -s -X POST -H "Authorization: Bearer $key" -H "Content-Type: application/json" \\\\
   --data-binary "@docs/examples/new-customer.json" http://localhost:8001/v1/customers
 ```
 
@@ -625,25 +579,15 @@ If another transaction holds the row lock too long, the API returns `503 DATABAS
 Errors follow the [RFC 9457 Problem Details](https://www.rfc-editor.org/rfc/rfc9457) format described above, including a request ID you can look up in the logs.
 
 | HTTP status | Code | Meaning |
-
 |---|---|---|
-
 | `400` | `MALFORMED_REQUEST` | The request body isn't valid JSON |
-
 | `401` | `UNAUTHENTICATED` | The key is missing or invalid |
-
 | `403` | `ACCOUNT_SUSPENDED` | The account isn't allowed to make requests |
-
 | `404` | `RESOURCE_NOT_FOUND` | The requested resource isn't available to this account |
-
 | `409` | `INVOICE_NOT_PAYABLE` | The invoice can't be paid in its current state |
-
 | `422` | `VALIDATION_FAILED` | A field is missing, invalid, or not supported |
-
 | `500` | `INTERNAL_ERROR` | An unexpected server error occurred |
-
 | `503` | `SERVICE_UNAVAILABLE` | A required dependency, such as PostgreSQL, is unavailable |
-
 | `503` | `DATABASE_BUSY` | A database operation timed out, including lock contention |
 
 The distinction between `400` and `422` is useful when helping someone debug an integration. A `400` means the body couldn't be parsed as JSON. A `422` means the JSON itself was valid, but didn't match the endpoint's expected fields.
@@ -664,23 +608,14 @@ The first should return `400 MALFORMED_REQUEST`; the second should return `422 V
 In addition to the access log, the API records events for authentication failures, invalid requests, business operations, and database problems.
 
 | Event | What to look for |
-
 |---|---|
-
 | `auth.rejected` | Why a key was rejected, plus its safe prefix |
-
 | `request.invalid_json` | JSON parsing error and position, without the body |
-
 | `request.validation_failed` | Which fields failed validation |
-
 | `customer.created` / `invoice.created` | IDs of newly created records |
-
 | `payment.recorded` / `invoice.paid` | Successful payment processing |
-
 | `payment.rejected` | An invoice couldn't be paid |
-
 | `db.unavailable` | Connection or dependency failure |
-
 | `db.lock_timeout` / `db.statement_timeout` | A database operation timed out |
 
 Authenticated request logs include an `account_id`, so you can narrow an investigation to one account. Each request also has an `X-Request-Id` that ties its response to the related events.
@@ -690,6 +625,8 @@ For example, a revoked key generates an `auth.rejected` event with `reason: revo
 ```powershell
 docker compose logs billing-api --tail 50
 ```
+
+SupportOps can also read these logs for you and put one request's entries in order; see [Investigating logs](#investigating-logs).
 
 The API never writes full keys, Authorization headers, request bodies, or customer email addresses to its logs.
 
@@ -780,7 +717,7 @@ To investigate a missing-key response, send the request without authentication a
 uv run supportops api request GET /v1/account --no-auth --request-id demo-auth-401
 ```
 
-The API should return `401 UNAUTHENTICATED`. You can then find `demo-auth-401` in the billing API's logs to see the internal rejection reason. The caller receives the generic error, while the server log contains the troubleshooting detail.
+The API should return `401 UNAUTHENTICATED`. You can then find `demo-auth-401` in the billing API's logs to see the internal rejection reason, for example with `uv run supportops logs trace demo-auth-401`. The caller receives the generic error, while the server log contains the troubleshooting detail.
 
 The most useful options are:
 
@@ -805,7 +742,9 @@ If inline JSON is malformed, SupportOps stops before sending it. This is particu
 SupportOps is primarily a diagnostic tool. A `POST`, `PUT`, `PATCH`, or `DELETE` request is allowed only when all three conditions are met:
 
 1. You include `--yes`.
+
 2. The target points to the local machine (`127.0.0.1`, `localhost`, or `::1`).
+
 3. The service's `/health` response identifies the environment as `lab`.
 
 The local-address and confirmation checks happen before sending the request. If the conditions are not met, SupportOps refuses the operation. It never automatically retries writes: after a timeout, you should check whether the original request succeeded before trying again.
@@ -843,7 +782,77 @@ Requests are sent one at a time, with a maximum count of 100. This is intended f
 The runbooks provide fuller procedures, including PowerShell and Linux examples:
 
 - [Service availability](docs/runbooks/service-availability.md) covers the health verdicts, connection failures, and a supervised PostgreSQL outage drill.
+
 - [API errors and reproduction](docs/runbooks/api-errors-and-reproduction.md) covers HTTP errors, request IDs, malformed JSON, safe requests, and latency checks.
+
+- [Logs and request IDs](docs/runbooks/logs-and-request-ids.md) covers reading structured logs, following one request, and investigating 401, 400/422 and 500 errors.
+
+## Investigating logs
+
+An HTTP status tells you what the API returned, but not necessarily what happened inside the service. SupportOps can read the billing API's structured logs to find related events, spot recurring errors, and follow individual requests without searching through raw JSON by hand.
+
+| Command | What it shows |
+|---|---|
+| `logs summary` | Activity by log level, event type, HTTP status, recurring error pattern, and slowest request |
+| `logs search` | Entries matching a request ID, severity, event, status, path, text, or time range |
+| `logs trace REQUEST_ID` | A chronological timeline of events recorded for one request |
+
+These commands are read-only. They don't change the service, its database, or the original logs.
+
+### Trace a failed request
+
+For example, send a request without an API key and give it a recognizable ID:
+
+```powershell
+uv run supportops api request GET /v1/account --no-auth --request-id demo-auth-401
+uv run supportops logs trace demo-auth-401
+```
+
+The first command intentionally receives `401 UNAUTHENTICATED`. The trace then brings together the server-side events for that request. A shortened example looks like this:
+
+```text
+2 log entries for request ID demo-auth-401 in docker:supportops-billing-api-1
+Highlights: authentication
+
++0 ms  WARNING  auth.rejected  API key rejected
+       reason=missing_header
++0 ms  INFO     http.request   GET /v1/account -> 401
+```
+
+The API response doesn't reveal why authentication failed; the `auth.rejected` event records that the Authorization header was missing. This distinction is useful when troubleshooting a customer's `401` without exposing credential details in the response.
+
+Events appear in timestamp order, with offsets relative to the first matching log entry. An exception's stack trace is included when one was logged. The timeline is evidence, not an automatic root-cause diagnosis. If the request ID isn't found, `logs trace` exits with code `1`.
+
+### Summarize activity and search for errors
+
+```powershell
+uv run supportops logs summary --since 15m
+uv run supportops logs search --status 4xx --since 15m
+uv run supportops logs search --event "auth.*" --path /v1/account
+uv run supportops logs search --request-id demo-auth-401
+```
+
+`logs summary` counts events, levels and HTTP statuses, highlights slow requests, and groups similar warnings and errors into patterns. Variable IDs and numbers are normalized for grouping, while meaningful distinctions such as status codes and failure reasons remain separate. Treat these patterns as a starting point for investigation, not proof that every event has the same cause.
+
+Search filters can be combined. `--level error` includes errors and more severe events; `--status` accepts either a code (`401`) or a class (`4xx`); and an event ending in `*` matches a prefix. Search returns the newest 50 matches by default, adjustable with `--limit`. Both `--since` and `--until` accept relative durations such as `15m` and ISO timestamps; the start is inclusive and the end exclusive.
+
+The lab generates frequent `/health` requests, which can dominate a summary. Use **`logs search --path /v1`** to narrow results to API traffic. The `summary` command does not have a `--path` filter.
+
+### Read logs from Docker, files, or stdin
+
+By default, log commands use `SUPPORTOPS_LOG_SOURCE`, which points to `docker:supportops-billing-api-1` in the local lab. You can override it with a file path, `-` for standard input, or an explicit Docker container source:
+
+```powershell
+uv run supportops logs summary docker:supportops-billing-api-1 --since 1h
+uv run supportops logs summary tests/fixtures/logs/billing-api.jsonl
+docker compose --project-name supportops logs --no-log-prefix billing-api | uv run supportops logs summary -
+```
+
+The reader supports UTF-8 and UTF-16, including files produced by Windows PowerShell 5.1. Invalid or incomplete JSON lines are counted and skipped rather than stopping the whole operation. It recognizes the billing API's log fields and common ECS-style fields from other services.
+
+Docker sources read up to the most recent 100,000 lines. If Docker isn't available, a container can't be found, or a file can't be read, SupportOps reports a source error rather than silently returning an empty result. Log output is redacted for common credentials and personal identifiers, including in JSON output and stack traces; as with any pattern-based masking, sensitive logs should still be handled carefully.
+
+For more examples, see the [Logs and request IDs runbook](docs/runbooks/logs-and-request-ids.md).
 
 ## Development
 
@@ -885,6 +894,8 @@ This lets the tests verify database roles, permissions, sample data, authenticat
 
 Integration tests also start the billing API on a temporary local port and exercise the diagnostics against it. This checks the CLI's behavior with a real API and PostgreSQL without using your running lab.
 
+The log sources are tested the same way: a short-lived container prints log lines for `docker logs` to read, and a separate SupportOps process reads UTF-16 input from standard input.
+
 ### Code quality checks
 
 Run Ruff's linting checks:
@@ -916,6 +927,7 @@ src/
 └── supportops/             # Main SupportOps CLI
     ├── cli/                # Commands and CLI entry points
     ├── db/                 # Read-only PostgreSQL connection check
+    ├── logs/               # Log sources, parsing, summaries, search and request traces
     ├── health.py           # Service health checks and verdicts
     ├── http_checks.py      # Diagnostic HTTP requests and failure classification
     ├── latency.py          # Response-time measurement
@@ -943,8 +955,9 @@ docs/
 ├── examples/               # Example JSON request bodies
 └── runbooks/               # Step-by-step troubleshooting guides
 tests/
+├── fixtures/               # Sample logs, including malformed lines and planted fake secrets
 ├── unit/                   # CLI and API unit tests
-└── integration/            # PostgreSQL and API integration tests
+└── integration/            # PostgreSQL, API and Docker integration tests
 compose.yaml                # Local PostgreSQL and billing API services
 ```
 
@@ -958,8 +971,8 @@ The API's Docker image is built to include only the packages the service needs, 
 
 ## Next build
 
-The billing lab and the first diagnostic commands are now in place. SupportOps can check service health, reproduce API requests with request IDs, and measure latency without needing a full monitoring stack.
+The billing lab and the first diagnostic commands are now in place. SupportOps can check service health, reproduce API requests with request IDs, measure latency, and summarize, search and trace structured logs without needing a full monitoring stack.
 
-The next stages will add structured log analysis, more detailed PostgreSQL and authentication checks, and guided incident investigations.
+The next stages will add more detailed PostgreSQL and authentication checks, and guided incident investigations.
 
 The goal is to build a tool that doesn't just report that something failed, but helps explain **what failed, where to look, and what might have caused it**.

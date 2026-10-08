@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     connect_timeout_seconds: float = Field(default=3.0, gt=0, le=60)
     http_timeout_seconds: float = Field(default=5.0, gt=0, le=300)
     slow_request_ms: float = Field(default=1000.0, gt=0, le=600_000)
+    log_source: str = Field(default="docker:supportops-billing-api-1", min_length=1)
 
     @field_validator("db_url")
     @classmethod

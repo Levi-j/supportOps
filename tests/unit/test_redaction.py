@@ -1,6 +1,12 @@
 import pytest
 
-from supportops.redaction import mask_api_key, redact_dsn, redact_text
+from supportops.redaction import (
+    is_secret_name,
+    mask_api_key,
+    redact_dsn,
+    redact_text,
+    redact_value,
+)
 
 REDACTED_CASES = [
     ("Authorization: Bearer abcdefghijklmnop", "Authorization: Bearer ***"),
@@ -21,6 +27,12 @@ REDACTED_CASES = [
         "contact ann.lee@juniper-dental.example today",
         "contact a***@juniper-dental.example today",
     ),
+    ('{"db_password": "hunter2"}', '{"db_password": "***"}'),
+    (
+        "connect({'password': 'hunter2', 'user': 'app'})",
+        "connect({'password': '***', 'user': 'app'})",
+    ),
+    ("Cookie: session=abc123; Path=/", "Cookie: ***; Path=/"),
 ]
 
 UNCHANGED_CASES = [
@@ -31,6 +43,7 @@ UNCHANGED_CASES = [
     "bk_wrong",
     "Bearer token expired",
     "Secret scanning: enabled",
+    '{"secret": true, "token_count": 5}',
 ]
 
 
@@ -83,3 +96,39 @@ def test_redact_dsn(dsn: str, expected: str) -> None:
 )
 def test_mask_api_key_keeps_only_the_prefix(value: str, expected: str) -> None:
     assert mask_api_key(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("password", True),
+        ("DB_PASSWORD", True),
+        ("x-api-key", True),
+        ("accessToken", True),
+        ("Authorization", True),
+        ("set-cookie", True),
+        ("key_prefix", False),
+        ("request_id", False),
+        ("credentials", False),
+    ],
+)
+def test_secret_field_names(name: str, expected: bool) -> None:
+    assert is_secret_name(name) is expected
+
+
+def test_redact_value_masks_secret_fields_at_any_depth() -> None:
+    value = {
+        "password": "hunter2",
+        "secret": True,
+        "nested": {"api_key": "plain-value", "items": ["Bearer abcdefghijklmnop"]},
+        "contact": "ann.lee@juniper-dental.example",
+        "count": 3,
+    }
+
+    assert redact_value(value) == {
+        "password": "***",
+        "secret": True,
+        "nested": {"api_key": "***", "items": ["Bearer ***"]},
+        "contact": "a***@juniper-dental.example",
+        "count": 3,
+    }
