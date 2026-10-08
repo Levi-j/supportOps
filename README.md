@@ -11,7 +11,9 @@ The project also includes a small billing service and PostgreSQL database that r
 ### Requirements
 
 - [uv](https://docs.astral.sh/uv/) for managing Python and project dependencies
+
 - Git
+
 - [Docker](https://www.docker.com/products/docker-desktop/) for running the local lab and integration tests
 
 SupportOps uses Python 3.13. You don't need to install Python separately, as `uv` can download and manage the required version.
@@ -77,7 +79,7 @@ The output looks something like this:
 |---|---|---|
 | SUPPORTOPS_TARGET | billing | env file |
 | SUPPORTOPS_API_URL | http://localhost:8001 | env file |
-| SUPPORTOPS_API_KEY | bk_placehold*** | env file |
+| SUPPORTOPS_API_KEY | bk_juniper01*** | env file |
 | SUPPORTOPS_DB_URL | postgresql://supportops_ro:***@localhost:5433/billing | env file |
 | SUPPORTOPS_HTTP_TIMEOUT_SECONDS | 5.0 | env file |
 
@@ -183,6 +185,7 @@ SupportOps includes a small backend environment that you can run on your own mac
 It consists of two services:
 
 - **Billing API:** A fictional invoicing service built with FastAPI.
+
 - **PostgreSQL 18:** A database containing sample customers, invoices, payments, and related billing records.
 
 The data is fictional, and the lab is designed for local development and troubleshooting.
@@ -254,6 +257,7 @@ The difference matters when troubleshooting.
 For example, the billing API might still be running even though PostgreSQL has stopped. In that situation:
 
 - `/health` returns `200`, because the API process is alive.
+
 - `/health/ready` returns `503`, because the API can't connect to its database.
 
 Readiness errors also indicate the type of connection problem, such as `dns_failure`, `connection_refused`, `authentication_failed`, or `database_missing`.
@@ -312,8 +316,11 @@ Structured logs are easier to search and filter than free-form text, especially 
 A few details are worth knowing:
 
 - Each request produces one `http.request` access log entry.
+
 - Logs include the URL path, but not query strings.
+
 - When the API starts, an `app.started` entry records connection details such as the database host and username, without exposing the password.
+
 - If an unexpected error occurs, the client receives a generic error response while the traceback is kept in the logs.
 
 ### Error responses
@@ -354,6 +361,7 @@ The `supportops_ro` user is even more restricted. It is intended for investigati
 Read-only access is enforced in two ways:
 
 1. Database sessions are read-only by default.
+
 2. The user has no write permissions on the billing tables.
 
 You can test those restrictions yourself.
@@ -446,13 +454,224 @@ PostgreSQL will recreate the schema and load the original sample data.
 
 The initialization scripts run when a new database volume is created. They don't automatically run again against an existing database.
 
+## Using the Billing API
+
+The billing API is the practice service that SupportOps will eventually troubleshoot. It has three fictional business accounts, each with its own customers and invoices. You can make requests, inspect responses, and follow those requests through the logs and database.
+
+The API is available at [http://localhost:8001/docs](http://localhost:8001/docs) when the lab is running. The Swagger page lets you explore all eight endpoints and make requests without writing a client.
+
+### Lab API keys
+
+The sample database includes these keys:
+
+| Key | Account | Status |
+|---|---|---|
+| `bk_juniper01_lab_only_not_a_real_key` | Juniper Dental Group | Active |
+| `bk_juniper00_lab_only_not_a_real_key` | Juniper Dental Group | Revoked |
+| `bk_kestrel01_lab_only_not_a_real_key` | Kestrel Logistics | Active |
+| `bk_alderfin1_lab_only_not_a_real_key` | Alder & Finch Studio | Account suspended |
+
+These are public test credentials for a local lab, not secrets for a real service. `.env.example` uses the active Juniper key. If you created `.env` during M2, compare the two files and update `SUPPORTOPS_API_KEY` in your local `.env` when you want to use the CLI with authenticated requests.
+
+All `/v1` endpoints require an API key sent as a bearer token:
+
+```text
+Authorization: Bearer bk_juniper01_lab_only_not_a_real_key
+```
+
+In Swagger, select **Authorize** and enter `Bearer ` followed by an active lab key.
+
+The API doesn't store the full key in PostgreSQL. It stores a 12-character prefix and a SHA-256 hash, then compares hashes in constant time. The prefix makes it possible to investigate an authentication problem without storing or logging the complete credential.
+
+A missing, malformed, unknown, revoked, or expired key always gets the same `401 UNAUTHENTICATED` response. The API keeps the exact reason in an `auth.rejected` log entry, where a support engineer can investigate it without giving information to an unauthenticated caller. A valid key for a suspended account instead gets `403 ACCOUNT_SUSPENDED`.
+
+### Available endpoints
+
+| Method | Endpoint | What it does |
+|---|---|---|
+| `GET` | `/v1/account` | Identifies the account associated with the API key |
+| `GET` | `/v1/customers` | Lists customers with `limit` and `offset` |
+| `POST` | `/v1/customers` | Creates a customer |
+| `GET` | `/v1/customers/{id}` | Retrieves one customer |
+| `GET` | `/v1/invoices` | Lists invoices, with status, customer, and pagination filters |
+| `POST` | `/v1/invoices` | Creates an invoice from line items |
+| `GET` | `/v1/invoices/{id}` | Retrieves an invoice and its lines |
+| `POST` | `/v1/invoices/{id}/pay` | Pays an open invoice in full |
+
+List endpoints return results in a `data` array, along with `has_more` to indicate whether another page is available.
+
+### Make a few requests
+
+**Windows PowerShell:**
+
+```powershell
+$key = "bk_juniper01_lab_only_not_a_real_key"
+
+curl.exe -s -H "Authorization: Bearer $key" http://localhost:8001/v1/account
+curl.exe -s -H "Authorization: Bearer $key" "http://localhost:8001/v1/invoices?status=open"
+```
+
+**Linux/macOS:**
+
+```bash
+key="bk_juniper01_lab_only_not_a_real_key"
+
+curl -s -H "Authorization: Bearer $key" http://localhost:8001/v1/account
+curl -s -H "Authorization: Bearer $key" "http://localhost:8001/v1/invoices?status=open"
+```
+
+To create a customer, use the example request in `docs/examples/new-customer.json`:
+
+**Windows PowerShell:**
+
+```powershell
+curl.exe -s -X POST -H "Authorization: Bearer $key" -H "Content-Type: application/json" `
+  --data-binary "@docs/examples/new-customer.json" http://localhost:8001/v1/customers
+```
+
+**Linux/macOS:**
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $key" -H "Content-Type: application/json" \
+  --data-binary "@docs/examples/new-customer.json" http://localhost:8001/v1/customers
+```
+
+That last request **adds a customer to your local database**. The example files also include intentionally invalid bodies you can use to investigate `400` and `422` responses.
+
+Using JSON files is especially helpful in Windows PowerShell 5.1, where passing JSON directly through `curl.exe` can strip double quotes.
+
+### Keeping customers separate
+
+The API takes the account ID from the verified key, not from a value supplied in the request. Every customer and invoice query is scoped to that account.
+
+For example, Kestrel can't retrieve a Juniper invoice:
+
+```powershell
+curl.exe -i -H "Authorization: Bearer bk_kestrel01_lab_only_not_a_real_key" http://localhost:8001/v1/invoices/inv_juniper_1003
+```
+
+The response is `404 Not Found`, just as it would be for an invoice ID that doesn't exist. Returning `403` here would reveal that another customer's invoice exists.
+
+An invoice cannot be created for a customer belonging to another account either; the API rejects that reference during validation.
+
+### Invoices and payments
+
+Invoice amounts are stored as **integer cents**. When you create an invoice, you supply its lines and unit prices; the server calculates the total. It won't accept a client-supplied `total_cents` field. See `docs/examples/invoice-with-total.json` for an example that is intentionally rejected.
+
+New invoices start as `open` and receive a number within their account, such as `INV-1005`.
+
+Paying an invoice does two things: it records a payment and changes the invoice status to `paid`. Normally, both changes happen in **one PostgreSQL transaction**. If something fails halfway through, neither change is saved.
+
+The API also locks the invoice row while processing a payment. This prevents two normal requests from paying the same invoice at once. An invoice that's already paid, still a draft, or otherwise not payable returns `409 INVOICE_NOT_PAYABLE`.
+
+If another transaction holds the row lock too long, the API returns `503 DATABASE_BUSY` with a `Retry-After` header. The default lock timeout is three seconds. Ordinary invoice reads can continue while the write is blocked.
+
+### Understanding API errors
+
+Errors follow the [RFC 9457 Problem Details](https://www.rfc-editor.org/rfc/rfc9457) format described above, including a request ID you can look up in the logs.
+
+| HTTP status | Code | Meaning |
+|---|---|---|
+| `400` | `MALFORMED_REQUEST` | The request body isn't valid JSON |
+| `401` | `UNAUTHENTICATED` | The key is missing or invalid |
+| `403` | `ACCOUNT_SUSPENDED` | The account isn't allowed to make requests |
+| `404` | `RESOURCE_NOT_FOUND` | The requested resource isn't available to this account |
+| `409` | `INVOICE_NOT_PAYABLE` | The invoice can't be paid in its current state |
+| `422` | `VALIDATION_FAILED` | A field is missing, invalid, or not supported |
+| `500` | `INTERNAL_ERROR` | An unexpected server error occurred |
+| `503` | `SERVICE_UNAVAILABLE` | A required dependency, such as PostgreSQL, is unavailable |
+| `503` | `DATABASE_BUSY` | A database operation timed out, including lock contention |
+
+The distinction between `400` and `422` is useful when helping someone debug an integration. A `400` means the body couldn't be parsed as JSON. A `422` means the JSON itself was valid, but didn't match the endpoint's expected fields.
+
+Validation responses identify the problem field without copying the value the client sent. Unknown fields are rejected rather than silently ignored.
+
+Try these examples (they should not create records):
+
+```powershell
+curl.exe -i -X POST -H "Authorization: Bearer $key" -H "Content-Type: application/json" --data-binary "@docs/examples/broken-customer.json" http://localhost:8001/v1/customers
+curl.exe -i -X POST -H "Authorization: Bearer $key" -H "Content-Type: application/json" --data-binary "@docs/examples/customer-missing-email.json" http://localhost:8001/v1/customers
+```
+
+The first should return `400 MALFORMED_REQUEST`; the second should return `422 VALIDATION_FAILED`.
+
+### Following a request through the logs
+
+In addition to the access log, the API records events for authentication failures, invalid requests, business operations, and database problems.
+
+| Event | What to look for |
+|---|---|
+| `auth.rejected` | Why a key was rejected, plus its safe prefix |
+| `request.invalid_json` | JSON parsing error and position, without the body |
+| `request.validation_failed` | Which fields failed validation |
+| `customer.created` / `invoice.created` | IDs of newly created records |
+| `payment.recorded` / `invoice.paid` | Successful payment processing |
+| `payment.rejected` | An invoice couldn't be paid |
+| `db.unavailable` | Connection or dependency failure |
+| `db.lock_timeout` / `db.statement_timeout` | A database operation timed out |
+
+Authenticated request logs include an `account_id`, so you can narrow an investigation to one account. Each request also has an `X-Request-Id` that ties its response to the related events.
+
+For example, a revoked key generates an `auth.rejected` event with `reason: revoked_key`, but the caller still sees only the generic 401 error.
+
+```powershell
+docker compose logs billing-api --tail 50
+```
+
+The API never writes full keys, Authorization headers, request bodies, or customer email addresses to its logs.
+
+### Reproducing a broken payment (lab only)
+
+The API includes one intentional fault, `payment_partial_commit`, to reproduce a billing problem that would normally require an engineering investigation.
+
+With this fault enabled, the API saves a payment and then fails before updating the invoice. The client gets `500`, but the invoice still appears unpaid. Retrying adds another payment. This is **deliberately incorrect behavior**, separate from the normal atomic payment implementation.
+
+The fault is **off by default** and works only when `BILLING_ENV=lab`. The API refuses to start if a fault is enabled in another environment, and it logs a `lab.fault_enabled` warning when the lab fault is active.
+
+The safest way to see this behavior is through the isolated integration tests, which use disposable databases and leave your local lab data alone:
+
+```bash
+uv run pytest -m integration -k fault
+```
+
+You can also try it in the running lab. **Use a newly created invoice, not one of the seeded invoices**, and remember this leaves extra payment records in the local database:
+
+```powershell
+$env:BILLING_FAULTS = "payment_partial_commit"
+docker compose up -d --wait billing-api
+
+$key = "bk_juniper01_lab_only_not_a_real_key"
+$invoice = curl.exe -s -X POST -H "Authorization: Bearer $key" -H "Content-Type: application/json" `
+  --data-binary "@docs/examples/new-invoice.json" http://localhost:8001/v1/invoices | ConvertFrom-Json
+
+curl.exe -i -X POST -H "Authorization: Bearer $key" http://localhost:8001/v1/invoices/$($invoice.id)/pay
+curl.exe -i -X POST -H "Authorization: Bearer $key" http://localhost:8001/v1/invoices/$($invoice.id)/pay
+curl.exe -s -H "Authorization: Bearer $key" http://localhost:8001/v1/invoices/$($invoice.id)
+```
+
+Both payment requests should fail with `500`, and the invoice should still be `open`, even though payments were recorded. Check the logs and the payment table to investigate what happened.
+
+**Turn the fault off when you're done:**
+
+```powershell
+Remove-Item Env:BILLING_FAULTS
+docker compose up -d --wait billing-api
+```
+
+Removing the environment variable alone doesn't change a container that's already running. The second command recreates the API with the fault disabled. It does not reset the database.
+
+If you want to remove the extra lab records, use the [reset procedure](#resetting-the-lab) after confirming that you don't need any data in the SupportOps database volume.
+
 ## Development
 
 SupportOps uses:
 
 - **pytest** for automated tests
+
 - **Ruff** for linting and formatting
+
 - **mypy** for static type checking
+
 - **GitHub Actions** for continuous integration
 
 ### Unit tests
@@ -477,7 +696,9 @@ Docker must be running for these tests.
 
 The tests start a temporary PostgreSQL container and initialize it using the same SQL scripts as the local lab. They don't use or modify the lab's existing database.
 
-This lets the tests verify database roles, permissions, sample data, and connection handling without relying on the state of your running lab.
+Tests that call the billing API get their own fresh copy of the sample database, cloned from a pristine template, and the copy is dropped afterwards. That way, a test that creates invoices or records payments can't affect any other test.
+
+This lets the tests verify database roles, permissions, sample data, authentication, tenant isolation, payments, lock timeouts, and the lab fault without relying on the state of your running lab.
 
 ### Code quality checks
 
@@ -513,31 +734,40 @@ src/
     ├── redaction.py        # Masking passwords and other sensitive data
     ├── render.py           # Terminal and JSON output
     └── errors.py           # Error handling and exit codes
-
 lab/
 ├── Dockerfile              # Billing API Docker image
 ├── pyproject.toml          # Dependencies for the lab service
 ├── sql/                    # Database roles, schema and sample data
 └── src/
     └── billing_api/        # FastAPI billing service
-
+        ├── main.py         # Application setup
+        ├── routes.py       # /v1 endpoints
+        ├── auth.py         # API-key authentication
+        ├── billing.py      # Customers, invoices and payments
+        ├── repository.py   # SQL queries, always scoped to one account
+        ├── errors.py       # Problem Details responses and error mapping
+        ├── faults.py       # Lab-only fault injection
+        └── ...             # Settings, logging, middleware, health checks
+docs/
+└── examples/               # Example JSON request bodies
 tests/
 ├── unit/                   # CLI and API unit tests
-└── integration/            # PostgreSQL integration tests
-
+└── integration/            # PostgreSQL and API integration tests
 compose.yaml                # Local PostgreSQL and billing API services
 ```
 
-The CLI and the billing API are separate Python packages in the same uv workspace.
+The CLI and billing API are separate Python packages in the same uv workspace. This keeps the CLI independent of the web framework and its dependencies.
+
+The API code is split by responsibility: `routes.py` handles HTTP requests, `billing.py` contains business rules and transaction handling, and `repository.py` holds parameterized SQL. That keeps the endpoints relatively small and makes the behavior easier to test.
+
+The billing API opens a database connection for each request rather than using a pool. For a small diagnostics lab, this keeps connection failures easy to classify—for example, distinguishing a DNS error from a refused connection. A higher-traffic production service would normally use connection pooling.
 
 The API's Docker image is built to include only the packages the service needs, and the application runs inside the container as a non-root user.
 
-## What's Next
+## Next builds
 
-SupportOps is being built in stages.
+The CLI foundation and local billing service are in place, including authenticated accounts, customers, invoices, payments, request tracing, and a lab-only payment fault.
 
-The CLI foundation and local billing environment are in place. The next steps are to add more realistic billing operations and build the diagnostics that will investigate them.
-
-The planned features include API health and authentication checks, structured log analysis, PostgreSQL diagnostics, and guided incident investigations.
+Next comes the main purpose of SupportOps: building the CLI diagnostics that investigate the service. These will cover API health, authentication issues, structured logs, PostgreSQL checks, and eventually guided incident investigations.
 
 The goal is to build a tool that doesn't just report that something failed, but helps explain **what failed, where to look, and what might have caused it**.

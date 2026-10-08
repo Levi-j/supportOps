@@ -26,6 +26,7 @@ services:
       dockerfile: lab/Dockerfile
     environment:
       BILLING_ENV: lab
+      BILLING_FAULTS: ${BILLING_FAULTS:-}
       BILLING_DATABASE_URL: postgresql://billing_app:${BILLING_APP_DB_PASSWORD:?Set BILLING_APP_DB_PASSWORD in .env}@postgres:5432/billing
     ports:
       - "127.0.0.1:8001:8000"

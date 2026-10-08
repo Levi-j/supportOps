@@ -1,0 +1,8 @@
+{
+  "customer_id": "cus_juniper_main",
+  "currency": "EUR",
+  "lines": [
+    {"description": "Practice management plan (monthly)", "quantity": 1, "unit_amount_cents": 4900},
+    {"description": "Additional staff seats", "quantity": 2, "unit_amount_cents": 1500}
+  ]
+}

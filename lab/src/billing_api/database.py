@@ -5,10 +5,13 @@ from typing import Any
 
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
+from psycopg.rows import TupleRow
 
 from billing_api.config import BillingSettings
 
 APPLICATION_NAME = "billing-api"
+
+Connection = psycopg.Connection[TupleRow]
 
 logger = logging.getLogger("billing_api.database")
 
@@ -29,6 +32,12 @@ def connection_kwargs(settings: BillingSettings) -> dict[str, Any]:
             f"-c lock_timeout={settings.db_lock_timeout_ms}"
         ),
     }
+
+
+def connect(settings: BillingSettings) -> Connection:
+    return psycopg.connect(
+        settings.database_url.get_secret_value(), autocommit=True, **connection_kwargs(settings)
+    )
 
 
 def describe_target(settings: BillingSettings) -> dict[str, str]:
@@ -57,7 +66,7 @@ def check_database(settings: BillingSettings) -> DatabaseStatus:
             extra={
                 "event_name": "db.unavailable",
                 "error": status.error,
-                "detail": _first_line(exc),
+                "detail": first_line(exc),
             },
         )
         return status
@@ -85,6 +94,6 @@ def _elapsed_ms(started: float) -> int:
     return round((perf_counter() - started) * 1000)
 
 
-def _first_line(exc: Exception) -> str:
+def first_line(exc: Exception) -> str:
     lines = str(exc).strip().splitlines()
     return lines[0][:300] if lines else type(exc).__name__

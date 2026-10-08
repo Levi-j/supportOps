@@ -2,6 +2,7 @@ import logging
 import re
 import uuid
 from time import perf_counter
+from typing import Any
 
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -56,15 +57,16 @@ class RequestContextMiddleware:
             response = problem_response(500, "INTERNAL_ERROR", "An unexpected error occurred.")
             await response(scope, receive, send_with_request_id)
         finally:
-            logger.info(
-                "HTTP request",
-                extra={
-                    "event_name": "http.request",
-                    "method": scope["method"],
-                    "path": scope["path"],
-                    "status": status_code,
-                    "duration_ms": round((perf_counter() - started) * 1000),
-                    "user_agent": (headers.get("user-agent") or "")[:_MAX_USER_AGENT_LENGTH],
-                },
-            )
+            access: dict[str, Any] = {
+                "event_name": "http.request",
+                "method": scope["method"],
+                "path": scope["path"],
+                "status": status_code,
+                "duration_ms": round((perf_counter() - started) * 1000),
+                "user_agent": (headers.get("user-agent") or "")[:_MAX_USER_AGENT_LENGTH],
+            }
+            state = scope.get("state")
+            if isinstance(state, dict) and state.get("account_id"):
+                access["account_id"] = state["account_id"]
+            logger.info("HTTP request", extra=access)
             request_id_var.reset(token)

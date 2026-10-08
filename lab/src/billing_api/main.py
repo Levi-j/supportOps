@@ -6,8 +6,8 @@ from importlib.metadata import version
 
 from fastapi import FastAPI
 
-from billing_api import database
-from billing_api.config import BillingSettings
+from billing_api import database, routes
+from billing_api.config import BillingSettings, ConfigurationError, load_settings
 from billing_api.database import DatabaseStatus
 from billing_api.errors import install_error_handlers
 from billing_api.health import health_router
@@ -21,10 +21,11 @@ def create_app(
     settings: BillingSettings | None = None,
     check_database: Callable[[], DatabaseStatus] | None = None,
 ) -> FastAPI:
-    settings = settings or BillingSettings()
+    settings = settings or _load_settings_or_log()
     configure_logging(settings.log_level)
     checker = check_database or partial(database.check_database, settings)
     app_version = version("supportops-lab")
+    faults = sorted(settings.faults)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -37,8 +38,14 @@ def create_app(
                 **database.describe_target(settings),
                 "db_statement_timeout_ms": settings.db_statement_timeout_ms,
                 "db_lock_timeout_ms": settings.db_lock_timeout_ms,
+                "faults": faults,
             },
         )
+        for fault in faults:
+            logger.warning(
+                "Lab fault enabled",
+                extra={"event_name": "lab.fault_enabled", "fault": fault},
+            )
         yield
 
     app = FastAPI(
@@ -47,7 +54,18 @@ def create_app(
         version=app_version,
         lifespan=lifespan,
     )
+    app.state.settings = settings
     app.add_middleware(RequestContextMiddleware)
     install_error_handlers(app)
     app.include_router(health_router(settings.env, checker))
+    app.include_router(routes.router)
     return app
+
+
+def _load_settings_or_log() -> BillingSettings:
+    try:
+        return load_settings()
+    except ConfigurationError as exc:
+        configure_logging("INFO")
+        logger.critical(str(exc), extra={"event_name": "app.config_invalid"})
+        raise
