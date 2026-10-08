@@ -4,16 +4,9 @@ from typing import LiteralString
 import psycopg
 import pytest
 
-from tests.integration.support import LabDatabase
+from tests.integration.support import LAB_KEYS, LabDatabase
 
 pytestmark = pytest.mark.integration
-
-LAB_KEYS = {
-    "key_juniper_old": "bk_juniper00_lab_only_not_a_real_key",
-    "key_juniper_main": "bk_juniper01_lab_only_not_a_real_key",
-    "key_kestrel_main": "bk_kestrel01_lab_only_not_a_real_key",
-    "key_alder_main": "bk_alderfin1_lab_only_not_a_real_key",
-}
 
 
 def query(database: LabDatabase, sql: LiteralString) -> list[tuple[object, ...]]:

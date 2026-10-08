@@ -1,6 +1,3 @@
-import logging
-from collections.abc import Iterator
-
 import pytest
 from fastapi import FastAPI
 from pydantic import SecretStr
@@ -8,16 +5,8 @@ from pydantic import SecretStr
 from billing_api.config import BillingSettings
 from billing_api.database import DatabaseStatus
 from billing_api.main import create_app
-from tests.unit.billing_api.support import FAKE_DB_PASSWORD, HEALTHY, AppFactory, JsonCapture
-
-
-@pytest.fixture
-def logs() -> Iterator[JsonCapture]:
-    capture = JsonCapture()
-    root = logging.getLogger()
-    root.addHandler(capture)
-    yield capture
-    root.removeHandler(capture)
+from tests.log_capture import JsonCapture
+from tests.unit.billing_api.support import FAKE_DB_PASSWORD, HEALTHY, AppFactory
 
 
 @pytest.fixture

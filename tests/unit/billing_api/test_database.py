@@ -6,7 +6,8 @@ from pydantic import SecretStr, ValidationError
 
 from billing_api import database
 from billing_api.config import BillingSettings
-from tests.unit.billing_api.support import FAKE_DB_PASSWORD, JsonCapture
+from tests.log_capture import JsonCapture
+from tests.unit.billing_api.support import FAKE_DB_PASSWORD
 
 
 @pytest.mark.parametrize(

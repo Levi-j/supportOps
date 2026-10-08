@@ -3,7 +3,8 @@ import re
 from fastapi.testclient import TestClient
 
 from billing_api.database import DatabaseStatus
-from tests.unit.billing_api.support import FAKE_DB_PASSWORD, AppFactory, JsonCapture
+from tests.log_capture import JsonCapture
+from tests.unit.billing_api.support import FAKE_DB_PASSWORD, AppFactory
 
 
 def app_entries(logs: JsonCapture) -> list[dict[str, object]]:
