@@ -40,5 +40,50 @@ jobs:
       - name: Validate Compose file
         run: docker compose --env-file .env.example config --quiet
 
+      - name: Validate scenario Compose file
+        env:
+          SCENARIO_LAB_ID: ci-config-check
+          SCENARIO_LAB_ADMIN_DB_PASSWORD: config-check-only
+          SCENARIO_BILLING_APP_DB_PASSWORD: config-check-only
+          SCENARIO_SUPPORTOPS_RO_DB_PASSWORD: config-check-only
+        run: docker compose --file compose.scenario.yaml --env-file /dev/null config --quiet
+
       - name: Build billing-api image
         run: docker build --file lab/Dockerfile --tag supportops-billing-api:ci .
+
+  e2e:
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: End-to-end incident scenarios
+        env:
+          SCENARIO_LAB_STATE_DIR: ${{ runner.temp }}/scenario-lab
+        run: uv run pytest -m e2e
+
+      - name: Scenario lab diagnostics
+        if: failure()
+        env:
+          SCENARIO_LAB_STATE_DIR: ${{ runner.temp }}/scenario-lab
+        run: |
+          uv run supportops-lab --project supportops-scenario-e2e --state-dir "$SCENARIO_LAB_STATE_DIR" status || true
+          for name in supportops-scenario-e2e-billing-api-1 supportops-scenario-e2e-postgres-1; do
+            echo "::group::docker logs $name"
+            docker logs --tail 200 "$name" || true
+            echo "::endgroup::"
+          done
+
+      - name: Remove the scenario lab
+        if: always()
+        env:
+          SCENARIO_LAB_STATE_DIR: ${{ runner.temp }}/scenario-lab
+        run: uv run supportops-lab --project supportops-scenario-e2e --state-dir "$SCENARIO_LAB_STATE_DIR" down

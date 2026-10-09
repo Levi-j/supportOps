@@ -1,0 +1,51 @@
+name: supportops-scenario
+
+x-ownership: &ownership
+  io.supportops.scenario-lab: "true"
+  io.supportops.lab-id: ${SCENARIO_LAB_ID:?Run supportops-lab, which generates this file's settings}
+
+services:
+  postgres:
+    image: postgres:18
+    labels: *ownership
+    environment:
+      POSTGRES_DB: billing
+      POSTGRES_USER: lab_admin
+      POSTGRES_PASSWORD: ${SCENARIO_LAB_ADMIN_DB_PASSWORD:?Run supportops-lab}
+      BILLING_APP_DB_PASSWORD: ${SCENARIO_BILLING_APP_DB_PASSWORD:?Run supportops-lab}
+      SUPPORTOPS_RO_DB_PASSWORD: ${SCENARIO_SUPPORTOPS_RO_DB_PASSWORD:?Run supportops-lab}
+    ports:
+      - "127.0.0.1::5432"
+    tmpfs:
+      - /var/lib/postgresql
+    volumes:
+      - ./lab/sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U lab_admin -d billing"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  billing-api:
+    build:
+      context: .
+      dockerfile: lab/Dockerfile
+    labels: *ownership
+    environment:
+      BILLING_ENV: lab
+      BILLING_FAULTS: ${SCENARIO_BILLING_FAULTS:-}
+      BILLING_DATABASE_URL: postgresql://billing_app:${SCENARIO_BILLING_APP_DB_PASSWORD:?Run supportops-lab}@postgres:5432/billing
+    ports:
+      - "127.0.0.1::8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+networks:
+  default:
+    labels: *ownership

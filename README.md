@@ -2,9 +2,9 @@
 
 SupportOps is a Python command-line toolkit for troubleshooting backend services and investigating application incidents.
 
-The idea is to bring common support tasks into one place: checking whether an API is healthy, understanding why requests are failing, reading application logs, inspecting database problems, and eventually putting those findings together to identify the cause of an incident.
+It brings common support tasks into a single workflow: checking service health, reproducing API failures, tracing requests through structured logs, examining PostgreSQL evidence, and preparing incident findings with clear confidence levels.
 
-The project also includes a small billing service and PostgreSQL database that run locally in Docker. They provide a controlled environment for testing diagnostics and reproducing common backend failures without relying on a real production system.
+A fictional billing API and PostgreSQL database provide a realistic local target. A separate, disposable scenario lab reproduces incidents without changing the persistent development database or relying on a production system.
 
 ## Getting Started
 
@@ -12,11 +12,11 @@ The project also includes a small billing service and PostgreSQL database that r
 
 - [uv](https://docs.astral.sh/uv/) for managing Python and project dependencies
 - Git
-- [Docker](https://www.docker.com/products/docker-desktop/) for running the local lab and integration tests
+- [Docker](https://www.docker.com/products/docker-desktop/) for the local lab, integration tests, and end-to-end scenarios
 
 SupportOps uses Python 3.13. You don't need to install Python separately, as `uv` can download and manage the required version.
 
-Docker isn't needed for the basic CLI commands, but you'll need it to run the billing API, PostgreSQL database, and integration tests.
+Docker isn't required for offline CLI commands or unit tests. You'll need it for the billing API, PostgreSQL, integration tests, and incident scenarios.
 
 ### Installation
 
@@ -624,43 +624,24 @@ The API never writes full keys, Authorization headers, request bodies, or custom
 
 ### Reproducing a broken payment (lab only)
 
-The API includes one intentional fault, `payment_partial_commit`, to reproduce a billing problem that would normally require an engineering investigation.
+The billing API includes one deliberate fault, `payment_partial_commit`, to demonstrate a payment inconsistency. With the fault enabled, the API records a payment but fails before marking the invoice paid. A retry can create a second payment record while the invoice remains open. This behavior is intentional and is separate from the API's normal atomic payment handling.
 
-With this fault enabled, the API saves a payment and then fails before updating the invoice. The client gets `500`, but the invoice still appears unpaid. Retrying adds another payment. This is **deliberately incorrect behavior**, separate from the normal atomic payment implementation.
+The fault works only in `BILLING_ENV=lab`; outside that environment, the service refuses to start with the fault enabled.
 
-The fault is **off by default** and works only when `BILLING_ENV=lab`. The API refuses to start if a fault is enabled in another environment, and it logs a `lab.fault_enabled` warning when the lab fault is active.
+**Use the disposable scenario lab to reproduce this case**, rather than enabling the fault in the persistent billing lab. Incident INC-003 runs the payment attempts against an isolated database, captures the request IDs, and provides a complete investigation trail:
 
-The safest way to see this behavior is through the isolated integration tests, which use disposable databases and leave your local lab data alone:
+```powershell
+uv run supportops-lab start INC-003
+uv run supportops --env-file .lab\supportops-scenario\supportops.env investigate inc003-cust-02
+```
+
+See [INC-003: Payment recorded, invoice still open](docs/incidents/INC-003-payment-recorded-invoice-open.md) for the evidence and escalation notes. The corresponding integration tests also exercise the fault using disposable databases:
 
 ```bash
 uv run pytest -m integration -k fault
 ```
 
-You can also try it in the running lab. **Use a newly created invoice, not one of the seeded invoices**, and remember this leaves extra payment records in the local database:
-
-```powershell
-$env:BILLING_FAULTS = "payment_partial_commit"
-docker compose up -d --wait billing-api
-$key = "bk_juniper01_lab_only_not_a_real_key"
-$invoice = curl.exe -s -X POST -H "Authorization: Bearer $key" -H "Content-Type: application/json" `
-  --data-binary "@docs/examples/new-invoice.json" http://localhost:8001/v1/invoices | ConvertFrom-Json
-curl.exe -i -X POST -H "Authorization: Bearer $key" http://localhost:8001/v1/invoices/$($invoice.id)/pay
-curl.exe -i -X POST -H "Authorization: Bearer $key" http://localhost:8001/v1/invoices/$($invoice.id)/pay
-curl.exe -s -H "Authorization: Bearer $key" http://localhost:8001/v1/invoices/$($invoice.id)
-```
-
-Both payment requests should fail with `500`, and the invoice should still be `open`, even though payments were recorded. Check the logs and the payment table to investigate what happened.
-
-**Turn the fault off when you're done:**
-
-```powershell
-Remove-Item Env:BILLING_FAULTS
-docker compose up -d --wait billing-api
-```
-
-Removing the environment variable alone doesn't change a container that's already running. The second command recreates the API with the fault disabled. It does not reset the database.
-
-If you want to remove the extra lab records, use the [reset procedure](#resetting-the-lab) after confirming that you don't need any data in the SupportOps database volume.
+Neither workflow requires modifying the persistent lab's invoice records or recreating its containers.
 
 ## Diagnosing the API
 
@@ -997,10 +978,73 @@ The report writer applies secret redaction and checks for configured credentials
 |---|---|
 | `0` | One or more findings were produced. |
 | `1` | The investigation was inconclusive. |
-| `2` | Invalid input or an existing report destination. |
+| `2` | Invalid input, unsafe short configured credentials, or an existing report destination. |
 | `3` | A required log source could not be read, or the report failed its secret check. |
 
 For a full triage workflow, including severity, escalation, and customer updates, see the [triage and escalation runbook](docs/runbooks/triage-and-escalation.md). Use the [incident report template](docs/incidents/TEMPLATE.md) when preparing a reviewed incident write-up.
+
+## Incident scenarios
+
+A useful investigation begins with a customer report, not a prepared diagnosis. The `supportops-lab` harness reproduces three simulated support incidents, sends the customer's requests, and gives you the request IDs needed to investigate what happened.
+
+The harness uses a **separate disposable environment**. It can reset and change that environment, while the existing `supportops` billing lab and its persistent database remain outside its scope. The diagnostic `supportops investigate` command remains read-only.
+
+### Reproduce and investigate an incident
+
+With Docker running, execute these commands from the repository root in Windows PowerShell:
+
+```powershell
+uv run supportops-lab scenarios
+uv run supportops-lab up
+uv run supportops-lab start INC-003
+uv run supportops --env-file .lab\supportops-scenario\supportops.env investigate inc003-cust-02
+uv run supportops-lab status
+```
+
+`scenarios` lists the available cases. `start` recreates the **disposable scenario lab**, applies the chosen incident, and sends its predefined customer requests. It prints the customer's problem statement, observed HTTP statuses, request IDs, and an investigation command. Repeating a scenario begins again from a clean seed.
+
+The cases cover three different kinds of support work:
+
+| Incident | Customer problem | Investigation result |
+| --- | --- | --- |
+| [INC-001: Revoked API key](docs/incidents/INC-001-revoked-api-key.md) | An integration unexpectedly starts receiving `401` responses. | `key_revoked`, confirmed; customer guidance, no engineering escalation. |
+| [INC-002: Malformed JSON from PowerShell](docs/incidents/INC-002-powershell-malformed-json.md) | A customer-creation request fails with `400` from a PowerShell script. | `malformed_json`, confirmed; reproduce the malformed body and correct the client request. |
+| [INC-003: Payment recorded, invoice still open](docs/incidents/INC-003-payment-recorded-invoice-open.md) | Two payment attempts return `500`, leaving two payment records on an open invoice. | `payment_invoice_inconsistent` and `unhandled_exception`, confirmed; high-severity engineering escalation. |
+
+Each [incident report](docs/incidents/README.md) follows the customer complaint through reproduction, HTTP responses, log and database evidence, findings, and a proposed resolution or handoff. These are simulated incidents, not defects discovered in a real customer system.
+
+To save an internal Markdown draft while investigating INC-003, add `--report` and choose a new filename:
+
+```powershell
+uv run supportops --env-file .lab\supportops-scenario\supportops.env investigate inc003-cust-02 --report reports\INC-003.md
+```
+
+Generated drafts may contain internal account details. Review the evidence and remove sensitive information before sharing any part of a report externally. SupportOps will not overwrite an existing report file.
+
+When finished, restore the scenario lab's clean baseline or remove it:
+
+```powershell
+uv run supportops-lab reset
+uv run supportops-lab down
+```
+
+`reset` recreates the disposable database and verifies the healthy baseline. `down` removes the scenario containers and their in-memory data. **Neither command resets the persistent `supportops` lab.**
+
+### Isolation and safety
+
+The scenario environment is defined in `compose.scenario.yaml` and runs under the `supportops-scenario` Docker Compose project, not the persistent project's `compose.yaml`.
+
+- **Separate resources:** The harness uses scenario-specific containers and networks. PostgreSQL stores its data on tmpfs rather than a Docker volume; its data disappears when the scenario environment is removed.
+- **Local, dynamic ports:** Docker assigns loopback-only host ports. The harness checks the assigned ports and refuses the persistent lab's reserved ports `8001` and `5433`.
+- **Dedicated configuration:** Generated scenario credentials and connection settings live under `.lab/supportops-scenario/`. This directory is excluded from Git and Docker builds. The harness supplies its own environment file instead of reading your normal `.env`.
+- **Ownership checks:** Before operations that change state, the harness checks the Compose project, expected services, resource labels, and lab ID. Scenario SQL runs only inside the verified scenario PostgreSQL container; customer requests go only to the verified scenario API.
+- **Fail-closed cleanup:** If ownership information is missing or inconsistent, the harness refuses to delete resources and provides recovery instructions for manual review. `down` does not use volume or orphan-removal flags.
+
+Use `--env-file .lab\supportops-scenario\supportops.env` when investigating a scenario. This selects its API, read-only database connection, and Docker log source. Environment variables already set in your shell can take precedence over an env file; `supportops-lab status` warns about conflicting `SUPPORTOPS_*` values. Check the effective target before running diagnostics.
+
+The generated `.lab/` files contain disposable credentials in plain text. Although they are Git-ignored, treat them as local configuration rather than documentation to share or commit.
+
+**Important:** INC-003 deliberately writes inconsistent payment data, but only inside this disposable scenario database. To work with the persistent lab, use the separate commands under [Local Lab](#local-lab); the scenario harness does not manage that environment.
 
 ## Development
 
@@ -1045,6 +1089,20 @@ Database diagnostics are tested against those disposable PostgreSQL instances. T
 
 Guided investigation tests exercise authentication failures, malformed requests, payment inconsistencies, lock contention, and database connectivity problems against disposable API and PostgreSQL instances. They verify the findings and evidence, including that running an investigation does not alter application data.
 
+### End-to-end tests
+
+The end-to-end suite exercises the three scenarios against a real billing API container and a disposable PostgreSQL instance:
+
+```bash
+uv run pytest -m e2e
+```
+
+Docker is required. The tests use their own Compose project, `supportops-scenario-e2e`, and temporary state. They do not read your normal `.env` or use the persistent lab or a manually started scenario environment.
+
+For each incident, the suite recreates a clean database, sends the customer requests, checks the expected investigation rules, confidence levels, supporting evidence and escalation decision, then resets and verifies the baseline. It also tests ownership checks and report handling, including secret redaction.
+
+The suite attempts to remove its scenario resources after completion or a handled failure. If the process is terminated abruptly, resources may remain; the harness refuses unsafe automatic cleanup when its ownership state is missing. Review any recovery instructions before running them.
+
 ### Code quality checks
 
 Run Ruff's linting checks:
@@ -1067,53 +1125,53 @@ uv run mypy
 
 These checks also run in GitHub Actions when changes are pushed or a pull request is opened against `main`.
 
-The CI workflow also runs PostgreSQL integration tests, validates the Docker Compose configuration, and builds the billing API image.
+CI also runs PostgreSQL integration tests, validates both Compose configurations, and builds the billing API image. A separate end-to-end job runs the three incidents on a GitHub-hosted runner using a disposable scenario project. Cleanup uses the same ownership checks as the local harness.
 
 ## Project Structure
 
 ```text
 src/
-└── supportops/             # Main SupportOps CLI
-    ├── cli/                # Commands and CLI entry points
-    ├── db/                 # Predefined, read-only PostgreSQL checks
-    ├── investigation/      # Request evidence, diagnostic rules and report drafts
-    ├── logs/               # Log sources, parsing, summaries, search and request traces
-    ├── auth_checks.py      # API-key validation and authentication diagnostics
-    ├── health.py           # Service health checks and verdicts
-    ├── http_checks.py      # Diagnostic HTTP requests and failure classification
-    ├── latency.py          # Response-time measurement
-    ├── write_guard.py      # Safety checks for requests that change data
-    ├── targets.py          # Health, readiness and authentication details of each service
-    ├── settings.py         # Configuration loading and validation
-    ├── redaction.py        # Masking passwords and other sensitive data
-    ├── render.py           # Terminal and JSON output
-    └── errors.py           # Error handling and exit codes
+├── supportops/             # Diagnostic CLI
+│   ├── cli/                # CLI commands
+│   ├── db/                 # Read-only PostgreSQL check catalog
+│   ├── investigation/      # Evidence, findings and Markdown reports
+│   ├── logs/               # Log sources, parsing, search and tracing
+│   ├── auth_checks.py      # Authentication diagnostics
+│   ├── health.py           # Service health checks
+│   ├── http_checks.py      # API request diagnostics
+│   ├── latency.py          # Response-time measurement
+│   ├── write_guard.py      # Guardrails for explicit API writes
+│   ├── targets.py          # Service-specific endpoint definitions
+│   ├── settings.py         # Configuration and validation
+│   ├── redaction.py        # Sensitive data masking
+│   ├── render.py           # Terminal and JSON output
+│   └── errors.py           # Error handling and exit codes
+└── supportops_lab/         # Disposable scenario harness
+    ├── cli.py              # Lab management commands
+    ├── lab.py              # Lab lifecycle
+    ├── scenarios.py        # Incident definitions
+    ├── customer.py         # Customer request simulator
+    ├── ownership.py        # Resource verification
+    └── ...                 # Compose, state and path helpers
 lab/
-├── Dockerfile              # Billing API Docker image
-├── pyproject.toml          # Dependencies for the lab service
-├── sql/                    # Database roles, schema and sample data
-└── src/
-    └── billing_api/        # FastAPI billing service
-        ├── main.py         # Application setup
-        ├── routes.py       # /v1 endpoints
-        ├── auth.py         # API-key authentication
-        ├── billing.py      # Customers, invoices and payments
-        ├── repository.py   # SQL queries, always scoped to one account
-        ├── errors.py       # Problem Details responses and error mapping
-        ├── faults.py       # Lab-only fault injection
-        └── ...             # Settings, logging, middleware, health checks
+├── Dockerfile              # Billing API container image
+├── pyproject.toml          # Billing API dependencies
+├── sql/                    # Roles, schema and seed records
+└── src/billing_api/        # FastAPI service, auth and billing logic
 docs/
-├── examples/               # Example JSON request bodies
-├── incidents/              # Incident report template
-└── runbooks/               # Step-by-step troubleshooting guides
+├── examples/               # API request bodies
+├── incidents/              # Incident index, template and INC-001 to INC-003
+└── runbooks/               # Troubleshooting guides
 tests/
-├── fixtures/               # Sample logs and golden report fixtures
-├── unit/                   # CLI and API unit tests
-└── integration/            # PostgreSQL, API and Docker integration tests
-compose.yaml                # Local PostgreSQL and billing API services
+├── fixtures/               # Logs and golden report fixtures
+├── unit/                   # CLI, API and harness unit tests
+├── integration/            # Real API and PostgreSQL integration tests
+└── e2e/                    # Reproducible scenario tests
+compose.yaml                # Persistent local billing lab
+compose.scenario.yaml       # Isolated, disposable scenario lab
 ```
 
-The CLI and billing API are separate Python packages in the same uv workspace. This keeps the CLI independent of the web framework and its dependencies.
+The diagnostic CLI and scenario harness are separate packages: `supportops` does not import `supportops_lab`. The billing API is a separate package in the same uv workspace, so the CLI does not depend on the web framework.
 
 The API code is split by responsibility: `routes.py` handles HTTP requests, `billing.py` contains business rules and transaction handling, and `repository.py` holds parameterized SQL. That keeps the endpoints relatively small and makes the behavior easier to test.
 
@@ -1123,4 +1181,4 @@ The API's Docker image is built to include only the packages the service needs, 
 
 ## Next steps
 
-SupportOps now combines API, log, authentication, and PostgreSQL evidence in a guided investigation, with explicit confidence levels and a reviewable report draft. The next milestone will add reproducible incident scenarios and documented case studies that show the full path from a customer report to diagnosis and escalation.
+SupportOps now connects API responses, structured logs, authentication failures and PostgreSQL diagnostics in an evidence-based investigation. Three reproducible incidents demonstrate the path from a customer report to a documented finding or engineering handoff. The next milestone will add service-availability and database-contention scenarios.
