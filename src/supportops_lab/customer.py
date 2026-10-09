@@ -1,4 +1,5 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import httpx
 
@@ -9,11 +10,16 @@ from supportops_lab.state import SentRequest
 
 USER_AGENT = "supportops-lab-customer/1.0"
 
+Watcher = Callable[[Future[SentRequest]], None]
+
 
 def send_requests(
     base_url: str,
     requests: Sequence[CustomerRequest],
     transport: httpx.BaseTransport | None = None,
+    *,
+    watched_request: str | None = None,
+    watcher: Watcher | None = None,
 ) -> list[SentRequest]:
     url = httpx.URL(base_url)
     if url.host != LOOPBACK or url.port is None or url.port in RESERVED_HOST_PORTS:
@@ -28,7 +34,13 @@ def send_requests(
         transport=transport,
     ) as client:
         confirm_lab_api(client)
-        return [_send(client, request) for request in requests]
+        sent = []
+        for request in requests:
+            if watcher is not None and request.request_id == watched_request:
+                sent.append(_send_watched(client, request, watcher))
+            else:
+                sent.append(_send(client, request))
+        return sent
 
 
 def confirm_lab_api(client: httpx.Client) -> None:
@@ -45,6 +57,13 @@ def confirm_lab_api(client: httpx.Client) -> None:
         )
 
 
+def _send_watched(client: httpx.Client, request: CustomerRequest, watcher: Watcher) -> SentRequest:
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="customer") as pool:
+        future = pool.submit(_send, client, request)
+        watcher(future)
+        return future.result()
+
+
 def _send(client: httpx.Client, request: CustomerRequest) -> SentRequest:
     headers = {"X-Request-Id": request.request_id}
     if request.api_key is not None:
@@ -56,6 +75,7 @@ def _send(client: httpx.Client, request: CustomerRequest) -> SentRequest:
         method=request.method,
         path=request.path,
         expected_status=request.expected_status,
+        expected_code=request.expected_code,
     )
     try:
         response = client.request(
@@ -66,4 +86,17 @@ def _send(client: httpx.Client, request: CustomerRequest) -> SentRequest:
         return sent
     sent.status = response.status_code
     sent.echoed_request_id = response.headers.get("X-Request-Id")
+    sent.retry_after = response.headers.get("Retry-After")
+    sent.problem_code = _problem_code(response)
     return sent
+
+
+def _problem_code(response: httpx.Response) -> str | None:
+    if response.status_code < 400:
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    code = body.get("code") if isinstance(body, dict) else None
+    return code if isinstance(code, str) else None

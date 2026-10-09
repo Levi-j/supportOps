@@ -41,6 +41,7 @@ class LabDatabase:
     host: str
     port: int
     database: str = DATABASE
+    container_id: str = ""
 
     def url(self, role: str, *, password: str | None = None, database: str | None = None) -> str:
         secret = PASSWORDS[role] if password is None else password

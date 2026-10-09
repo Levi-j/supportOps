@@ -197,6 +197,26 @@ The check uses PostgreSQL's `pg_blocking_pids()` to pair each waiting session wi
 
 A common pattern is an API request waiting behind a maintenance script or console session left `idle in transaction`. The check identifies what PostgreSQL is observing; it does not determine whether the blocking work is safe to cancel.
 
+**Timing matters.** `pg.blocking_sessions` only has rows while a session is *waiting*. The billing API gives up after its lock timeout (3 seconds by default), and its waiting session then disappears. A check run after the customer's `503` shows the blocker in `pg.long_transactions`, but usually an empty `pg.blocking_sessions`. That doesn't mean there is no blocker. To see the relationship itself, run `pg.blocking_sessions` while a blocked request is in progress.
+
+A waiting row lock appears as `Lock:transactionid` in `waiting_for`. PostgreSQL stores row locks on the row, so the waiting session waits for the holder's transaction to end.
+
+### Practise it safely: INC-005
+
+[INC-005](../incidents/INC-005-blocked-writes.md) reproduces a blocked payment in the disposable scenario lab, never in the persistent `supportops` lab:
+
+```powershell
+uv run supportops-lab start INC-005
+uv run supportops-lab status
+uv run supportops --env-file .lab\supportops-scenario\supportops.env db run pg.long_transactions pg.blocking_sessions --param min_seconds=10
+uv run supportops --env-file .lab\supportops-scenario\supportops.env investigate inc005-cust-01
+uv run supportops-lab reset
+```
+
+The scenario holds a row lock from a session named `invoice-backfill` that stays `idle in transaction`. The customer's payments return `503 DATABASE_BUSY` with `Retry-After: 5`, while reading the same invoice returns `200`. That is MVCC in action: plain reads use the last committed row version and don't wait for row locks.
+
+`supportops-lab status` shows the lock wait the harness captured while the first payment was waiting. `reset` removes the session by recreating the disposable database container, then checks that `pg.long_transactions` and `pg.blocking_sessions` are clear.
+
 ### What support must not do
 
 Once you have identified a possible blocker or consistency issue, **collect evidence and escalate**. Do not:

@@ -3,9 +3,10 @@ from typing import Any
 
 import pytest
 
-from supportops_lab.lab import ScenarioLab
+from supportops_lab.lab import ScenarioLab, StartResult
+from supportops_lab.ownership import RESERVED_HOST_PORTS
 from supportops_lab.scenarios import LAB_KEYS, SCENARIOS, Scenario
-from tests.e2e.support import investigate, read, secrets_of
+from tests.e2e.support import investigate, read, secrets_of, supportops
 
 pytestmark = pytest.mark.e2e
 
@@ -55,15 +56,23 @@ def test_incident_reproduces_and_is_diagnosed(
     for secret in [*secrets_of(scenario_lab), *LAB_KEYS]:
         assert secret not in everything
 
-    _scenario_specific(scenario.id, report)
+    _scenario_specific(scenario.id, report, result, scenario_lab)
 
     baseline = scenario_lab.reset()
     assert baseline.clean, baseline
+    assert baseline.checks["pg.long_transactions"] == "pass"
+    assert baseline.checks["pg.blocking_sessions"] == "pass"
 
 
-def _scenario_specific(scenario_id: str, report: dict[str, Any]) -> None:
+def _scenario_specific(
+    scenario_id: str, report: dict[str, Any], result: StartResult, lab: ScenarioLab
+) -> None:
     summary = report["findings"][0]["summary"]
-    if scenario_id == "INC-001":
+    if scenario_id == "INC-004":
+        _db_misconfigured(report, result, lab)
+    elif scenario_id == "INC-005":
+        _blocked_writes(report, result)
+    elif scenario_id == "INC-001":
         assert "revoked_key" in summary
         assert "bk_kestrel01" in summary
         key = check(report, "billing.api_key_status")["rows"][0]
@@ -72,7 +81,7 @@ def _scenario_specific(scenario_id: str, report: dict[str, Any]) -> None:
         assert "double quotes" in summary
         assert "PowerShell 5.1" in report["findings"][0]["inferences"][0]
         assert report["live"]["database"] == "not_needed"
-    else:
+    elif scenario_id == "INC-003":
         state = report["live"]["invoice"]
         assert state["conditions"] == [
             "billing.payment_on_unpaid_invoice",
@@ -86,3 +95,60 @@ def _scenario_specific(scenario_id: str, report: dict[str, Any]) -> None:
         payments = check(report, "billing.duplicate_payments")["rows"][0]["payment_ids"]
         assert report["logs"]["entities"]["payment_ids"][0] in payments
         assert any("lab fault" in caveat for caveat in report["findings"][1]["caveats"])
+    else:
+        raise AssertionError(f"No scenario-specific checks for {scenario_id}")
+
+
+def _db_misconfigured(report: dict[str, Any], result: StartResult, lab: ScenarioLab) -> None:
+    assert [item.problem_code for item in result.requests] == ["SERVICE_UNAVAILABLE"] * 2
+    assert result.api_database_host == "localhost"
+    settings = lab.settings()
+    assert settings.api_url.port not in RESERVED_HOST_PORTS
+
+    health_run, health = supportops(lab, "health", "--json")
+    assert health_run.exit_code == 1, health_run.output
+    assert (health["verdict"], health["diagnosis"]) == ("DEGRADED", "api_cannot_reach_database")
+    assert health["database"]["reachable"] is True
+    assert health["readiness"]["status"] == 503
+    assert not any("docker compose" in step for step in health["next_steps"])
+    connectivity, _ = supportops(lab, "db", "run", "db.connectivity")
+    assert connectivity.exit_code == 0, connectivity.output
+
+    finding = report["findings"][0]
+    assert "connection_refused" in finding["summary"]
+    assert any("localhost" in item and "container" in item for item in finding["inferences"])
+    assert any("database_host=localhost" in item["summary"] for item in report["evidence"])
+    assert report["live"]["health"]["diagnosis"] == "api_cannot_reach_database"
+
+
+def _blocked_writes(report: dict[str, Any], result: StartResult) -> None:
+    assert [(item.status, item.problem_code, item.retry_after) for item in result.requests] == [
+        (503, "DATABASE_BUSY", "5"),
+        (200, None, None),
+        (503, "DATABASE_BUSY", "5"),
+    ]
+    capture = result.lock_wait
+    assert capture is not None
+    assert capture.request_id == "inc005-cust-01"
+    [wait] = capture.rows
+    assert (wait["blocked_application"], wait["blocked_role"]) == ("billing-api", "billing_app")
+    assert (wait["blocking_pid"], wait["blocking_application"], wait["blocking_state"]) == (
+        capture.holder_pid,
+        "invoice-backfill",
+        "idle in transaction",
+    )
+    assert wait["waiting_for"].startswith("Lock:")
+    assert "FOR UPDATE" in wait["blocked_query"]
+    assert wait["blocking_transaction_seconds"] >= 10
+
+    holders = check(report, "pg.long_transactions")["rows"]
+    assert [(row["pid"], row["application"], row["state"]) for row in holders] == [
+        (capture.holder_pid, "invoice-backfill", "idle in transaction")
+    ]
+    assert check(report, "pg.blocking_sessions")["rows"] == []
+    invoice = check(report, "billing.invoice_lookup")["rows"][0]
+    assert (invoice["status"], invoice["succeeded_payments"]) == ("open", 0)
+    finding = report["findings"][0]
+    assert "invoice-backfill" in finding["inferences"][0]
+    assert "doesn't appear to have taken a payment" in finding["inferences"][1]
+    assert finding["next_steps"][-1].startswith("Ask the customer not to repeat the payment")

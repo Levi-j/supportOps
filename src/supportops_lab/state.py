@@ -3,13 +3,14 @@ import secrets
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from supportops_lab.docker import UnsafeOperation
 
 LabStatus = Literal["starting", "running", "stopped"]
+ApiDatabaseHost = Literal["postgres", "localhost"]
 
 
 class SentRequest(BaseModel):
@@ -17,9 +18,26 @@ class SentRequest(BaseModel):
     method: str
     path: str
     expected_status: int
+    expected_code: str | None = None
     status: int | None = None
+    problem_code: str | None = None
+    retry_after: str | None = None
     echoed_request_id: str | None = None
     error: str | None = None
+
+    @property
+    def as_expected(self) -> bool:
+        return self.status == self.expected_status and (
+            self.expected_code is None or self.problem_code == self.expected_code
+        )
+
+
+class LockWaitCapture(BaseModel):
+    check: str = "pg.blocking_sessions"
+    request_id: str
+    holder_pid: int
+    captured_at: datetime
+    rows: list[dict[str, Any]]
 
 
 class LabState(BaseModel):
@@ -34,11 +52,13 @@ class LabState(BaseModel):
     billing_app_password: str = Field(repr=False)
     supportops_ro_password: str = Field(repr=False)
     faults: list[str] = Field(default_factory=list)
+    api_database_host: ApiDatabaseHost = "postgres"
     api_port: int | None = None
     database_port: int | None = None
     api_container: str | None = None
     scenario: str | None = None
     requests: list[SentRequest] = Field(default_factory=list)
+    lock_wait: LockWaitCapture | None = None
 
     @property
     def passwords(self) -> tuple[str, str, str]:
@@ -98,6 +118,7 @@ class StateStore:
                     ("SCENARIO_BILLING_APP_DB_PASSWORD", state.billing_app_password),
                     ("SCENARIO_SUPPORTOPS_RO_DB_PASSWORD", state.supportops_ro_password),
                     ("SCENARIO_BILLING_FAULTS", ",".join(state.faults)),
+                    ("SCENARIO_API_DATABASE_HOST", state.api_database_host),
                 )
             ),
         )

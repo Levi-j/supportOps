@@ -12,14 +12,16 @@ E2E_PROJECT = "supportops-scenario-e2e"
 runner = CliRunner()
 
 
-def investigate(lab: ScenarioLab, request_id: str, *args: str) -> tuple[Result, dict[str, Any]]:
+def supportops(lab: ScenarioLab, *args: str) -> tuple[Result, dict[str, Any]]:
     result = runner.invoke(
-        app,
-        ["--env-file", str(lab.store.supportops_env), "investigate", request_id, "--json", *args],
-        env={"COLUMNS": "200"},
+        app, ["--env-file", str(lab.store.supportops_env), *args], env={"COLUMNS": "200"}
     )
     data = json.loads(result.stdout) if result.stdout.startswith("{") else {}
     return result, data
+
+
+def investigate(lab: ScenarioLab, request_id: str, *args: str) -> tuple[Result, dict[str, Any]]:
+    return supportops(lab, "investigate", request_id, "--json", *args)
 
 
 def secrets_of(lab: ScenarioLab) -> list[str]:

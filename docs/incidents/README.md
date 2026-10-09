@@ -1,22 +1,26 @@
 # Incident reports
 
-These reports document three reproducible troubleshooting cases in the **disposable SupportOps scenario lab**. Each follows a customer-style complaint through reproduction, request tracing, evidence gathering, diagnosis, and a support or engineering response.
+These five reports document simulated support incidents against the SupportOps billing API. Each starts with a customer-reported symptom, reproduces the failure in an isolated lab, and works through the available HTTP, log, and PostgreSQL evidence to reach a diagnosis or engineering handoff.
 
-The incidents are **simulated**, not production cases. Accounts, credentials, invoices, and payment records are fictional. The investigation excerpts are drawn from actual scenario runs and are identified with their original request IDs and timestamps.
+All accounts, credentials, invoices, and payments are fictional. These are **reproducible exercises, not production incidents**. The reports include excerpts from actual scenario runs, with the original request IDs and timestamps. Each one distinguishes the facts observed during the request from later database checks and any conclusions that still require verification.
 
 ## Incident index
 
-| Incident | Reported problem | Confirmed finding | Severity | Recommended owner |
+| Incident | Reported issue | Finding | Severity | Next owner |
 | --- | --- | --- | --- | --- |
-| [INC-001 — Revoked API key](INC-001-revoked-api-key.md) | Integration starts receiving `401` responses. | `key_revoked` | Low | Customer / integration owner, with support guidance |
-| [INC-002 — PowerShell JSON formatting](INC-002-powershell-malformed-json.md) | Creating a customer fails with `400` from a PowerShell script. | `malformed_json` | Low | Customer / integration owner, with support guidance |
-| [INC-003 — Duplicate payment records](INC-003-payment-recorded-invoice-open.md) | Two payment attempts fail while the invoice remains open. | `payment_invoice_inconsistent` and `unhandled_exception` | High | Engineering |
+| [INC-001 — Revoked API key](INC-001-revoked-api-key.md) | An integration unexpectedly starts receiving `401` responses. | `key_revoked` | Low | Integration owner, supported by the support team |
+| [INC-002 — Malformed JSON in PowerShell](INC-002-powershell-malformed-json.md) | A customer-creation request returns `400` from a PowerShell script. | `malformed_json` | Low | Integration owner, supported by the support team |
+| [INC-003 — Payment records on an open invoice](INC-003-payment-recorded-invoice-open.md) | Two payment requests fail, but payment records exist and the invoice remains open. | `payment_invoice_inconsistent` and `unhandled_exception` | High | Engineering |
+| [INC-004 — Incorrect database host](INC-004-db-misconfigured.md) | API requests return `503` after maintenance, although the service is running. | `api_cannot_reach_database` | High | Deployment owner / on-call |
+| [INC-005 — Payment blocked by an open transaction](INC-005-blocked-writes.md) | Payments time out with `503 DATABASE_BUSY` while invoice reads continue to work. | `lock_contention` | High | Engineering / DBA |
 
-Each finding above was reported with **confirmed** confidence for the reproduced request. The reports separately identify unverified interpretations and any limitations in log coverage.
+The investigations returned **confirmed** findings for the reproduced requests. That label applies to the specific failure established by the request logs and corroborating evidence; it does not mean every suggested root cause or every measure of customer impact has been independently verified.
 
-## Reproduce and investigate a case
+For example, INC-004 confirms that the API could not connect to its database. Its startup configuration then supports the explanation that `localhost` referred to the API container rather than PostgreSQL. In INC-005, a lock-wait snapshot captured during the payment request identifies the blocking session. The report also explains why a later database check no longer shows the waiting connection.
 
-From the repository root, with Docker running:
+## Reproducing an incident
+
+With Docker running, use the commands below from the repository root:
 
 ```powershell
 uv run supportops-lab start INC-001
@@ -24,14 +28,16 @@ uv run supportops --env-file .lab\supportops-scenario\supportops.env investigate
 uv run supportops-lab reset
 ```
 
-`start` recreates the **scenario lab only** and replays the selected incident with predictable request IDs. Its Compose project, temporary database, ports, and configuration are separate from the persistent `supportops` lab. The reset command clears the disposable scenario data; it does not reset your regular billing database.
+`start` recreates the **disposable scenario lab**, applies the selected failure, and sends predefined requests with recognizable IDs. The scenarios use their own Docker Compose project, temporary database, dynamically assigned ports, and generated configuration. They do not reset or change the persistent `supportops` lab.
 
-To verify the complete workflow automatically:
+Two scenarios introduce infrastructure-level failures. INC-004 recreates the disposable billing API with an incorrect database hostname; INC-005 holds an invoice row lock open in a PostgreSQL session. `supportops-lab reset` removes either condition by recreating the disposable environment and checking service health, data consistency, and database session activity.
+
+To run the automated incident tests:
 
 ```powershell
 uv run pytest -m e2e
 ```
 
-The E2E suite uses its own isolated scenario project and checks the observed responses, investigation findings, confidence levels, escalation decisions, and clean reset behavior.
+The E2E suite uses a separate, test-owned scenario project. It checks the expected API responses, diagnostic findings, confidence levels, escalations, and recovery to a clean baseline.
 
-For future reports, use the [incident template](TEMPLATE.md). The [triage and escalation runbook](../runbooks/triage-and-escalation.md) explains how to assess severity, hand evidence to engineering, and prepare customer-safe updates.
+For new investigations, start with the [incident template](TEMPLATE.md). The [triage and escalation runbook](../runbooks/triage-and-escalation.md) covers severity assessment, engineering handoffs, and customer-safe communication.

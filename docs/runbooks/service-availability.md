@@ -135,29 +135,44 @@ A live API with failed readiness usually points to a dependency or configuration
 
 If the diagnosis is `api_cannot_reach_database`, the database answered from the support machine, but the API couldn't use it. Start with the application's configuration and network path.
 
-Check recent database errors:
+Check recent database errors and the configuration recorded at startup. Both commands only read the configured log source (`SUPPORTOPS_LOG_SOURCE`):
 
 ```powershell
-docker compose logs billing-api | Select-String db.unavailable
+uv run supportops logs search --event db.unavailable
+uv run supportops logs search --event app.started
 ```
 
-Then inspect the configuration recorded at startup:
-
-```powershell
-docker compose logs billing-api | Select-String app.started
-```
-
-The startup event includes the database host, port, name, and username without exposing the password.
+The startup event includes the database host, port, name, and username without exposing the password. `supportops investigate REQUEST_ID` cites it automatically when a request failed with `db.unavailable`.
 
 **Container networking is a common cause.** Inside the billing API container, `localhost` refers to that container, not the PostgreSQL container. The correct database host in this Compose environment is `postgres`, on port `5432`.
 
-If you make a configuration change to the **local lab**, recreate only the API service so it reads the updated settings:
+Changing the configuration and restarting the API is the service owner's decision. If you make a configuration change to the **persistent local lab** yourself, recreate only its API service, naming the project explicitly so the command can't reach anything else:
 
 ```powershell
 docker compose --project-name supportops up -d billing-api
 ```
 
 Then run `uv run supportops health` again. Do not apply the same restart procedure blindly to a shared or production environment.
+
+### Practise it safely: INC-004
+
+[INC-004](../incidents/INC-004-db-misconfigured.md) reproduces this failure in the disposable scenario lab, never in the persistent `supportops` lab:
+
+```powershell
+uv run supportops-lab start INC-004
+uv run supportops --env-file .lab\supportops-scenario\supportops.env health
+uv run supportops --env-file .lab\supportops-scenario\supportops.env investigate inc004-cust-01
+uv run supportops-lab reset
+```
+
+Expect `DEGRADED` with diagnosis `api_cannot_reach_database` and exit code `1`:
+- liveness `200`;
+- readiness `503` with `connection_refused`;
+- PostgreSQL reachable from the support machine.
+
+Docker still reports the API container as `healthy`, because its health check only calls `/health`.
+
+Use `supportops-lab reset` to recover the scenario lab. Plain `docker compose` commands without `--project-name` and `--file compose.scenario.yaml` target the persistent lab instead.
 
 ### PostgreSQL is unreachable from both sides
 

@@ -9,7 +9,7 @@ from supportops_lab.cli import LabOptions, app
 from supportops_lab.docker import Resources
 from supportops_lab.lab import ScenarioLab
 from tests.unit.lab.support import PROJECT, FakeDocker, container
-from tests.unit.lab.test_lab import CLEAN, DIRTY, FakeApi
+from tests.unit.lab.test_lab import CLEAN, DIRTY, FakeActivity, FakeApi, health_report
 
 runner = CliRunner()
 
@@ -140,8 +140,63 @@ def test_status_of_unverified_resources_exits_1(
     assert "wasn't created by supportops-lab" in result.stdout
 
 
-def test_scenarios_lists_all_three() -> None:
+def test_scenarios_lists_all_five() -> None:
     result = runner.invoke(app, ["scenarios"], env={"COLUMNS": "200"})
 
-    for scenario in ("INC-001", "INC-002", "INC-003"):
+    for scenario in ("INC-001", "INC-002", "INC-003", "INC-004", "INC-005"):
         assert scenario in result.stdout
+
+
+@pytest.fixture
+def scenario_docker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeDocker:
+    fake = FakeDocker()
+
+    def make(options: LabOptions) -> ScenarioLab:
+        return ScenarioLab(
+            options.project,
+            tmp_path / ".lab",
+            docker=fake,  # type: ignore[arg-type]
+            transport=FakeApi().transport,
+            baseline=lambda settings: CLEAN,
+            health=lambda settings: health_report(),
+            activity=FakeActivity(),
+        )
+
+    monkeypatch.setattr(cli, "make_lab", make)
+    return fake
+
+
+def test_start_db_misconfigured_prints_the_change_and_safe_recovery(
+    scenario_docker: FakeDocker,
+) -> None:
+    result = invoke("start", "INC-004")
+    status = invoke("status")
+
+    output = " ".join(result.stdout.split())
+    assert result.exit_code == 0, result.output
+    assert "recreated with database host localhost" in output
+    assert "Health check after the change: DEGRADED (api_cannot_reach_database)" in output
+    assert (
+        "inc004-cust-01 GET /v1/invoices -> 503 SERVICE_UNAVAILABLE "
+        "(expected 503 SERVICE_UNAVAILABLE)" in output
+    )
+    assert "supportops.env health" in output
+    assert "Recover with 'uv run supportops-lab reset'" in output
+    assert "docker compose" not in output
+    assert "API database host: localhost" in " ".join(status.stdout.split())
+
+
+def test_start_blocked_writes_prints_the_captured_lock_wait(scenario_docker: FakeDocker) -> None:
+    result = invoke("start", "INC-005")
+    status = invoke("status", "--json")
+
+    output = " ".join(result.stdout.split())
+    assert result.exit_code == 0, result.output
+    assert "-> 503 DATABASE_BUSY, Retry-After 5 (expected 503 DATABASE_BUSY)" in output
+    assert "while inc005-cust-01 was waiting" in output
+    assert (
+        "session 90 (billing-api, billing_app) waiting 1 s for Lock:transactionid, blocked by "
+        "session 77 (invoice-backfill, idle in transaction, transaction open 13 s)" in output
+    )
+    assert "db run pg.long_transactions pg.blocking_sessions" in output
+    assert json.loads(status.stdout)["lock_wait"]["holder_pid"] == 77

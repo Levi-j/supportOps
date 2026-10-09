@@ -34,7 +34,7 @@ services:
     environment:
       BILLING_ENV: lab
       BILLING_FAULTS: ${SCENARIO_BILLING_FAULTS:-}
-      BILLING_DATABASE_URL: postgresql://billing_app:${SCENARIO_BILLING_APP_DB_PASSWORD:?Run supportops-lab}@postgres:5432/billing
+      BILLING_DATABASE_URL: postgresql://billing_app:${SCENARIO_BILLING_APP_DB_PASSWORD:?Run supportops-lab}@${SCENARIO_API_DATABASE_HOST:-postgres}:5432/billing
     ports:
       - "127.0.0.1::8000"
     depends_on:

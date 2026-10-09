@@ -129,6 +129,25 @@ def test_verdict_table(
     assert assessment.summary
 
 
+@pytest.mark.parametrize("db", [database(), None], ids=["db-reachable", "db-not-configured"])
+def test_api_side_database_failures_give_lab_neutral_next_steps(db: DatabaseProbe | None) -> None:
+    assessment = assess(BILLING, http(200), http(503), DOWN_DB, db)
+
+    steps = " ".join(assessment.next_steps)
+    assert "docker compose" not in steps
+    assert "supportops logs search --event db.unavailable" in steps
+
+
+def test_the_unreachable_database_advice_doesnt_recreate_anything_itself() -> None:
+    assessment = assess(BILLING, http(200), http(503), DOWN_DB, database())
+
+    assert assessment.next_steps[-1] == (
+        "After the API's database settings are corrected, whoever operates the service must "
+        "restart or redeploy it; then run 'supportops health' again."
+    )
+    assert any("localhost means the container itself" in step for step in assessment.next_steps)
+
+
 def test_database_outage_names_both_failing_views() -> None:
     assessment = assess(BILLING, http(200), http(503), DOWN_DB, database("timeout"))
 

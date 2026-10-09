@@ -8,13 +8,16 @@ import pytest
 from supportops.errors import ExitCode
 from supportops_lab import docker as docker_module
 from supportops_lab.docker import (
+    HOLDER_SCRIPT,
     DockerClient,
     DockerError,
     compose_command,
+    holder_command,
     run_subprocess,
     sanitized_env,
 )
 from supportops_lab.paths import COMPOSE_FILE, REPO_ROOT
+from supportops_lab.scenarios import INVOICE_BACKFILL
 from tests.unit.lab.support import (
     DOCKER,
     PROJECT,
@@ -163,6 +166,56 @@ def test_scenario_sql_runs_only_inside_the_given_container() -> None:
     assert "--single-transaction" in command
     assert not any("5433" in part or "127.0.0.1" in part for part in command)
     assert runner.inputs[0] == b"SELECT 1;"
+
+
+def test_the_lock_holder_runs_detached_inside_the_given_container_only() -> None:
+    runner = ScriptedRunner()
+    holder = INVOICE_BACKFILL
+
+    DockerClient(runner).start_lock_holder(
+        "id-postgres",
+        sql=holder.sql,
+        role=holder.role,
+        application_name=holder.application_name,
+    )
+
+    command = runner.commands[0]
+    assert command == [
+        DOCKER,
+        "exec",
+        "--detach",
+        "--env",
+        "PGAPPNAME=invoice-backfill",
+        "--env",
+        "HOLDER_ROLE=billing_app",
+        "--env",
+        "HOLDER_DATABASE=billing",
+        "--env",
+        f"HOLDER_SQL={holder.sql}",
+        "id-postgres",
+        "sh",
+        "-c",
+        HOLDER_SCRIPT,
+    ]
+    assert "compose" not in command
+    assert not any("5433" in part or "127.0.0.1" in part for part in command)
+    assert runner.inputs[0] is None
+
+
+def test_the_holder_script_keeps_the_transaction_open_without_embedding_sql() -> None:
+    assert "exec sleep infinity" in HOLDER_SCRIPT
+    assert '"$HOLDER_SQL"' in HOLDER_SCRIPT
+    assert "--set ON_ERROR_STOP=1" in HOLDER_SCRIPT
+    assert "--single-transaction" not in HOLDER_SCRIPT
+    assert "billing.invoices" not in HOLDER_SCRIPT
+
+
+def test_the_holder_command_builder_takes_the_database_name() -> None:
+    command = holder_command(
+        DOCKER, "abc", sql="BEGIN;", role="r", application_name="a", database="billing_x"
+    )
+
+    assert "HOLDER_DATABASE=billing_x" in command
 
 
 def test_the_runner_is_module_level_and_replaceable() -> None:

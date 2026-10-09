@@ -513,6 +513,7 @@ def lock_contention(facts: Facts) -> Finding | None:
     long = facts.checked(LONG_TRANSACTIONS_CHECK)
     blocking = facts.checked(BLOCKING_CHECK)
     holders = [row for row in (long.rows if long else []) if row.get("locks_held")]
+    write = facts.method in WRITE_METHODS
     severity: Severity = "medium"
     if long is None and blocking is None:
         assessment.caveats.append(
@@ -531,6 +532,11 @@ def lock_contention(facts: Facts) -> Finding | None:
             + ". This is the database's current state, linked to the request only by time."
         )
         assessment.caveats.append(CURRENT_STATE_CAVEAT)
+        if holders and blocking is not None and not blocking.rows:
+            assessment.caveats.append(
+                f"{BLOCKING_CHECK} shows no session waiting now. A lock wait ends when the "
+                "request times out, so the wait itself can't be seen after the fact."
+            )
     else:
         for name, result in ((LONG_TRANSACTIONS_CHECK, long), (BLOCKING_CHECK, blocking)):
             if result is not None:
@@ -539,6 +545,8 @@ def lock_contention(facts: Facts) -> Finding | None:
             "No long transaction holds locks now, so the blocking session has probably "
             "finished. The problem may come back."
         )
+    if write:
+        _note_blocked_write(facts, assessment)
     return finding(
         "lock_contention",
         title,
@@ -548,7 +556,9 @@ def lock_contention(facts: Facts) -> Finding | None:
             "Check the impact below for other requests that failed the same way.",
             "Ask engineering or the DBA to identify and end the blocking session; support's "
             "read-only role can't and mustn't do that.",
-            "Advise the customer to retry later rather than in a tight loop.",
+            _blocked_write_step(facts)
+            if write
+            else "Advise the customer to retry later rather than in a tight loop.",
         ],
         escalation=Escalation(
             team="Engineering / DBA",
@@ -768,6 +778,41 @@ def _note_lab_faults(facts: Facts, assessment: Assessment) -> None:
             f"The service started with lab fault(s) enabled ({', '.join(faults)}), which inject "
             "failures deliberately."
         )
+
+
+def _note_blocked_write(facts: Facts, assessment: Assessment) -> None:
+    state = facts.live.invoice
+    if state is None or state.lookup != "found" or state.record is None:
+        return
+    invoice = state.invoice_id
+    assessment.cite(check_key(INVOICE_CHECK))
+    if CURRENT_STATE_CAVEAT not in assessment.caveats:
+        assessment.caveats.append(CURRENT_STATE_CAVEAT)
+    recorded = [
+        entry
+        for entry in facts.entries("payment.recorded")
+        if entry[1].extra.get("invoice_id") == invoice
+    ]
+    if recorded:
+        assessment.inferences.append(
+            f"This request logged payment.recorded for {invoice} before the timeout; check that "
+            "payment before the customer tries again."
+        )
+        return
+    assessment.inferences.append(
+        f"Invoice {invoice} is still {state.record.get('status')} with "
+        f"{state.record.get('succeeded_payments')} successful payments, and this request logged "
+        "no payment.recorded event, so this attempt doesn't appear to have taken a payment."
+    )
+
+
+def _blocked_write_step(facts: Facts) -> str:
+    path = (facts.logs.request.path or "") if facts.logs.request else ""
+    attempt = "payment" if path.endswith("/pay") else "request"
+    return (
+        f"Ask the customer not to repeat the {attempt} until the blocking session has been dealt "
+        "with; each attempt waits for the same lock."
+    )
 
 
 def _note_loopback_database(facts: Facts, assessment: Assessment, event: LogEvent) -> None:

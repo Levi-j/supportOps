@@ -11,6 +11,7 @@ from supportops_lab.lab import Baseline, LabReport, ScenarioLab, StartResult, di
 from supportops_lab.ownership import DEFAULT_PROJECT
 from supportops_lab.paths import STATE_ROOT
 from supportops_lab.scenarios import SCENARIOS
+from supportops_lab.state import LockWaitCapture
 
 app = typer.Typer(
     cls=SupportOpsGroup,
@@ -151,8 +152,18 @@ def _print_status(report: LabReport) -> None:
         render.emit_line(f"PostgreSQL: {report.database}")
     if report.faults:
         render.emit_line(f"Lab faults: {', '.join(report.faults)}")
+    if report.api_database_host and report.api_database_host != "postgres":
+        render.emit_line(
+            f"API database host: {report.api_database_host} (scenario misconfiguration; "
+            "'supportops-lab reset' restores postgres)",
+            style="yellow",
+        )
     if report.scenario:
         render.emit_line(f"Active scenario: {report.scenario}")
+        if not report.requests:
+            render.emit_line("No customer requests were recorded; the scenario didn't finish.")
+    if report.lock_wait:
+        _print_lock_wait(report.lock_wait)
     if report.supportops_env:
         env_file = display_path(Path(report.supportops_env))
         render.emit_line(f"Investigate with: uv run supportops --env-file {env_file} ...")
@@ -181,19 +192,55 @@ def _print_start(result: StartResult) -> None:
     render.emit_line(f'Customer report: "{result.customer_report}"')
     render.emit_line(f"Simulation: {result.simulation}", style="dim")
     render.emit_line()
+    if result.api_database_host != "postgres":
+        render.emit_line(
+            f"The billing API was recreated with database host {result.api_database_host}."
+        )
+    if result.health:
+        render.emit_line(f"Health check after the change: {result.health}")
     render.emit_line(f"Customer requests sent to the scenario lab at {result.api_url}:")
     for item in result.requests:
         outcome = str(item.status) if item.status is not None else f"failed ({item.error})"
-        marker = "" if item.status == item.expected_status else "  UNEXPECTED"
+        if item.problem_code:
+            outcome += f" {item.problem_code}"
+        if item.retry_after:
+            outcome += f", Retry-After {item.retry_after}"
+        expected = str(item.expected_status)
+        if item.expected_code:
+            expected += f" {item.expected_code}"
+        marker = "" if item.as_expected else "  UNEXPECTED"
         render.emit_line(
             f"  {item.request_id}  {item.method} {item.path} -> {outcome} "
-            f"(expected {item.expected_status}){marker}",
+            f"(expected {expected}){marker}",
             style=None if marker == "" else "bold red",
         )
+    if result.lock_wait:
+        _print_lock_wait(result.lock_wait)
     render.emit_line()
     render.emit_line("Investigate:", style="bold")
     render.emit_line(f"  {result.investigate}")
+    for command in result.follow_up:
+        render.emit_line(f"  {command}")
+    render.emit_line(
+        "Recover with 'uv run supportops-lab reset'; it recreates only the scenario lab.",
+        style="dim",
+    )
     render.emit_line(f"Incident report: {result.report}", style="dim")
+
+
+def _print_lock_wait(capture: LockWaitCapture) -> None:
+    render.emit_line(
+        f"Lock wait captured at {capture.captured_at.isoformat(timespec='milliseconds')} with "
+        f"{capture.check} while {capture.request_id} was waiting:"
+    )
+    for row in capture.rows:
+        render.emit_line(
+            f"  session {row.get('blocked_pid')} ({row.get('blocked_application')}, "
+            f"{row.get('blocked_role')}) waiting {row.get('waiting_seconds')} s for "
+            f"{row.get('waiting_for')}, blocked by session {row.get('blocking_pid')} "
+            f"({row.get('blocking_application')}, {row.get('blocking_state')}, transaction open "
+            f"{row.get('blocking_transaction_seconds')} s)"
+        )
 
 
 def _exit_unless(condition: bool) -> None:

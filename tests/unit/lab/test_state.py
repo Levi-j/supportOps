@@ -1,11 +1,13 @@
+import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from supportops.errors import ExitCode
 from supportops.settings import load_settings
 from supportops_lab.docker import UnsafeOperation
-from supportops_lab.state import StateStore, new_state
+from supportops_lab.state import LabState, SentRequest, StateStore, new_state
 from tests.unit.lab.support import PROJECT
 
 
@@ -78,8 +80,54 @@ def test_compose_env_contains_only_scenario_settings(tmp_path: Path) -> None:
         "SCENARIO_BILLING_APP_DB_PASSWORD",
         "SCENARIO_SUPPORTOPS_RO_DB_PASSWORD",
         "SCENARIO_BILLING_FAULTS",
+        "SCENARIO_API_DATABASE_HOST",
     ]
-    assert lines[-1] == "SCENARIO_BILLING_FAULTS=payment_partial_commit"
+    assert lines[-2] == "SCENARIO_BILLING_FAULTS=payment_partial_commit"
+    assert lines[-1] == "SCENARIO_API_DATABASE_HOST=postgres"
+
+
+def test_the_api_database_host_is_restricted() -> None:
+    state = new_state(PROJECT)
+    data = state.model_dump()
+
+    assert LabState.model_validate({**data, "api_database_host": "localhost"})
+    with pytest.raises(ValidationError):
+        LabState.model_validate({**data, "api_database_host": "10.0.0.5"})
+
+
+def test_state_files_from_before_m9_still_load(tmp_path: Path) -> None:
+    states = store(tmp_path)
+    state = new_state(PROJECT)
+    data = json.loads(state.model_dump_json())
+    for name in ("api_database_host", "lock_wait"):
+        del data[name]
+    states.directory.mkdir(parents=True)
+    states.state_file.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = states.load()
+
+    assert loaded is not None
+    assert (loaded.api_database_host, loaded.lock_wait) == ("postgres", None)
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "expected"),
+    [(503, "DATABASE_BUSY", True), (503, "SERVICE_UNAVAILABLE", False), (500, None, False)],
+)
+def test_a_request_is_as_expected_only_with_the_expected_code(
+    status: int, code: str | None, expected: bool
+) -> None:
+    sent = SentRequest(
+        request_id="inc005-cust-01",
+        method="POST",
+        path="/v1/invoices/inv_kestrel_2002/pay",
+        expected_status=503,
+        expected_code="DATABASE_BUSY",
+        status=status,
+        problem_code=code,
+    )
+
+    assert sent.as_expected is expected
 
 
 def test_supportops_env_targets_the_scenario_lab(tmp_path: Path) -> None:

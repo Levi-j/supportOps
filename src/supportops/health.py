@@ -193,10 +193,7 @@ def assess(
     reported = (
         f" (the API reports: {api_database.error})" if api_database and api_database.error else ""
     )
-    log_step = (
-        "Find the API's database errors: "
-        "docker compose logs billing-api | Select-String db.unavailable"
-    )
+    log_step = "Find the API's database errors: supportops logs search --event db.unavailable"
     if database is None:
         return Assessment(
             Verdict.DEGRADED,
@@ -221,8 +218,8 @@ def assess(
                 log_step,
                 "Check the API's database host, port, name and credentials. Inside a container, "
                 "localhost means the container itself, not the database.",
-                "After fixing the configuration, recreate the API: "
-                "docker compose up -d billing-api",
+                "After the API's database settings are corrected, whoever operates the service "
+                "must restart or redeploy it; then run 'supportops health' again.",
             ],
         )
     if database.error == "error":

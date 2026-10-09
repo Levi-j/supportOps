@@ -120,6 +120,35 @@ def read_env(path: Path) -> dict[str, str]:
     return {name: value for name, value in pairs}
 
 
+def holder_row(**overrides: Any) -> dict[str, Any]:
+    return {
+        "pid": 77,
+        "role": "billing_app",
+        "application": "invoice-backfill",
+        "state": "idle in transaction",
+        "transaction_seconds": 12,
+        "locks_held": 3,
+        "last_query": "BEGIN; SELECT id, status FROM billing.invoices WHERE id = 'x' FOR UPDATE;",
+        **overrides,
+    }
+
+
+def wait_row(**overrides: Any) -> dict[str, Any]:
+    return {
+        "blocked_pid": 90,
+        "blocked_role": "billing_app",
+        "blocked_application": "billing-api",
+        "waiting_seconds": 1,
+        "waiting_for": "Lock:transactionid",
+        "blocked_query": "SELECT id, status FROM billing.invoices WHERE x FOR UPDATE",
+        "blocking_pid": 77,
+        "blocking_application": "invoice-backfill",
+        "blocking_state": "idle in transaction",
+        "blocking_transaction_seconds": 13,
+        **overrides,
+    }
+
+
 def lab_resources(
     project: str, lab_id: str, api_port: str = "55001", database_port: str = "55002"
 ) -> Resources:
@@ -151,14 +180,18 @@ class FakeDocker:
         *,
         api_port: str = "55001",
         database_port: str = "55002",
+        recreated_api_port: str = "55003",
         leave_behind: bool = False,
     ) -> None:
         self.current = existing or Resources()
         self.api_port = api_port
         self.database_port = database_port
+        self.recreated_api_port = recreated_api_port
         self.leave_behind = leave_behind
+        self.after_recreate: Callable[[Resources], Resources] | None = None
         self.calls: list[tuple[str, ...]] = []
         self.sql: list[tuple[str, str]] = []
+        self.holders: list[dict[str, str]] = []
         self.env: dict[str, str] = {}
 
     def resources(self, project: str) -> Resources:
@@ -168,7 +201,9 @@ class FakeDocker:
     def compose(self, project: str, env_file: Path, *arguments: str, timeout: float = 0) -> None:
         self.calls.append(("compose", *arguments))
         self.env = read_env(env_file)
-        if arguments[0] == "up":
+        if arguments[0] == "up" and "--no-deps" in arguments:
+            self._recreate_api(project)
+        elif arguments[0] == "up":
             self.current = lab_resources(
                 project, self.env["SCENARIO_LAB_ID"], self.api_port, self.database_port
             )
@@ -178,6 +213,41 @@ class FakeDocker:
     def exec_sql(self, container_id: str, sql: str) -> None:
         self.calls.append(("exec_sql", container_id))
         self.sql.append((container_id, sql))
+
+    def start_lock_holder(
+        self,
+        container_id: str,
+        *,
+        sql: str,
+        role: str,
+        application_name: str,
+        database: str = "billing",
+    ) -> None:
+        self.calls.append(("start_lock_holder", container_id))
+        self.holders.append(
+            {
+                "container_id": container_id,
+                "sql": sql,
+                "role": role,
+                "application_name": application_name,
+                "database": database,
+            }
+        )
+
+    def _recreate_api(self, project: str) -> None:
+        database = self.current.service("postgres")
+        assert database is not None
+        api = ContainerInfo(
+            id="id-billing-api-recreated",
+            name=f"{project}-billing-api-1",
+            labels=labels("billing-api", lab_id=self.env["SCENARIO_LAB_ID"], project=project),
+            status="running",
+            health="healthy",
+            ports={"8000/tcp": (PortBinding("127.0.0.1", self.recreated_api_port),)},
+        )
+        self.current = Resources(containers=(database, api), networks=self.current.networks)
+        if self.after_recreate is not None:
+            self.current = self.after_recreate(self.current)
 
     @property
     def compose_calls(self) -> list[tuple[str, ...]]:

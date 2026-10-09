@@ -47,6 +47,10 @@ def run_rules(
     return findings
 
 
+def cited_keys(entries: list[dict[str, Any]], live: LiveEvidence) -> list[Finding]:
+    return apply_rules(Facts(collect_entries(spanning(*entries), source="api.jsonl"), live))
+
+
 def only(findings: list[Finding], rule: str) -> Finding:
     matching = [item for item in findings if item.rule == rule]
     assert len(matching) == 1, [item.rule for item in findings]
@@ -498,6 +502,76 @@ def test_a_lock_timeout_without_database_access() -> None:
     item = only(run_rules(lock_entries(), live_evidence(database="disabled")), "lock_contention")
 
     assert any("--no-db" in caveat for caveat in item.caveats)
+
+
+def blocked_payment_live(record: dict[str, Any] | None = None) -> LiveEvidence:
+    holder = {
+        "pid": 4242,
+        "application": "invoice-backfill",
+        "state": "idle in transaction",
+        "transaction_seconds": 14,
+        "locks_held": 3,
+    }
+    record = record or invoice_row()
+    return live_evidence(
+        checks=[
+            check_result("billing.invoice_lookup", [record]),
+            check_result("pg.long_transactions", [holder]),
+            check_result("pg.blocking_sessions", []),
+        ],
+        invoice=InvoiceState(invoice_id=INVOICE, lookup="found", record=record),
+    )
+
+
+def test_a_blocked_payment_cites_the_invoice_and_says_no_payment_was_taken() -> None:
+    item = only(cited_keys(lock_entries(), blocked_payment_live()), "lock_contention")
+
+    assert item.confidence == Confidence.CONFIRMED
+    assert "invoice-backfill" in item.inferences[0]
+    assert item.inferences[1] == (
+        f"Invoice {INVOICE} is still open with 0 successful payments, and this request logged no "
+        "payment.recorded event, so this attempt doesn't appear to have taken a payment."
+    )
+    assert "check:billing.invoice_lookup" in item.evidence_ids
+    assert "check:pg.long_transactions" in item.evidence_ids
+    assert "check:pg.blocking_sessions" not in item.evidence_ids
+    assert any("pg.blocking_sessions shows no session waiting now" in c for c in item.caveats)
+    assert (
+        item.caveats.count(
+            "Database results show the state when the investigation ran, not at the time of the "
+            "request."
+        )
+        == 1
+    )
+    assert item.next_steps[-1] == (
+        "Ask the customer not to repeat the payment until the blocking session has been dealt "
+        "with; each attempt waits for the same lock."
+    )
+    assert not item.contradictions
+
+
+def test_a_blocked_payment_that_logged_a_payment_says_so() -> None:
+    entries = [
+        event(0, "payment.recorded", invoice_id=INVOICE, payment_id="pay_1"),
+        *lock_entries(),
+    ]
+
+    item = only(run_rules(entries, blocked_payment_live()), "lock_contention")
+
+    assert "logged payment.recorded" in item.inferences[1]
+
+
+def test_a_blocked_read_keeps_the_retry_later_advice() -> None:
+    entries = [
+        event(0, "db.lock_timeout", detail="canceling statement due to lock timeout"),
+        access(0.01, status=503, method="GET", path=f"/v1/invoices/{INVOICE}"),
+    ]
+
+    item = only(cited_keys(entries, blocked_payment_live()), "lock_contention")
+
+    assert item.next_steps[-1] == "Advise the customer to retry later rather than in a tight loop."
+    assert "check:billing.invoice_lookup" not in item.evidence_ids
+    assert len(item.inferences) == 1
 
 
 def health_report(diagnosis: str, verdict: Verdict = Verdict.DEGRADED) -> HealthReport:

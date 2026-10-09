@@ -92,6 +92,26 @@ uv run supportops investigate REQUEST_ID --report reports/REQUEST_ID.md
 
 The report is redacted and will not overwrite an existing file. The `reports/` directory is excluded from Git. **Review every draft before sharing it**: automated masking may not catch sensitive details that do not match a known pattern, and internal findings may not be appropriate for the customer.
 
+### What to add for availability and lock incidents
+
+**`api_cannot_reach_database` (deployment owner / on-call):**
+- the health result with its time;
+- liveness and readiness statuses, and whether PostgreSQL answered the support-side check;
+- the API's `db.unavailable` error category;
+- the `app.started` line showing the configured database host, port and user (never the password);
+- when the failures began relative to the last deployment or maintenance.
+
+Ask the owner to verify and correct the configuration, then confirm that readiness returns `200`. [INC-004](../incidents/INC-004-db-misconfigured.md) is a worked example.
+
+**`lock_contention` (Engineering / DBA):**
+- the affected request and invoice;
+- the blocking session's pid, application name, role, state, transaction age and last query, from `pg.long_transactions`;
+- any `pg.blocking_sessions` rows captured while a request was waiting;
+- the `db.lock_timeout` log entry;
+- whether a payment was recorded for the failed attempt.
+
+Ask the session's owner to complete or safely end the transaction. Support must not cancel or terminate sessions. [INC-005](../incidents/INC-005-blocked-writes.md) is a worked example.
+
 ### Escalation handoff example
 
 ```text

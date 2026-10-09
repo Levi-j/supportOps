@@ -34,6 +34,23 @@ def test_starting_the_same_scenario_twice_is_deterministic(scenario_lab: Scenari
     assert scenario_lab.reset().clean
 
 
+def test_up_after_the_misconfiguration_restores_a_clean_baseline(
+    scenario_lab: ScenarioLab,
+) -> None:
+    started = scenario_lab.start("INC-004")
+    assert started.reproduced
+    misconfigured = scenario_lab.store.load()
+    assert misconfigured is not None
+    assert misconfigured.api_database_host == "localhost"
+
+    state = scenario_lab.up(build=False)
+
+    assert state.api_database_host == "postgres"
+    assert state.api_port not in RESERVED_HOST_PORTS
+    baseline = scenario_lab.baseline()
+    assert baseline.clean, baseline
+
+
 def test_a_foreign_lab_id_blocks_every_destructive_step(scenario_lab: ScenarioLab) -> None:
     original = scenario_lab.store.state_file.read_bytes()
     state = scenario_lab.store.load()

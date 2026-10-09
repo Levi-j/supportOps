@@ -18,6 +18,10 @@ COMMAND_TIMEOUT_SECONDS = 60.0
 COMPOSE_TIMEOUT_SECONDS = 900.0
 MAX_ERROR_CHARACTERS = 300
 _SANITIZED_PREFIXES = ("COMPOSE_", "SCENARIO_")
+HOLDER_SCRIPT = (
+    '{ printf "%s\\n" "$HOLDER_SQL"; exec sleep infinity; } | psql --username "$HOLDER_ROLE" '
+    '--dbname "$HOLDER_DATABASE" --no-psqlrc --quiet --set ON_ERROR_STOP=1'
+)
 
 Runner = Callable[[Sequence[str], float, bytes | None], subprocess.CompletedProcess[bytes]]
 
@@ -111,6 +115,34 @@ def compose_command(
     ]
 
 
+def holder_command(
+    docker: str,
+    container_id: str,
+    *,
+    sql: str,
+    role: str,
+    application_name: str,
+    database: str,
+) -> list[str]:
+    return [
+        docker,
+        "exec",
+        "--detach",
+        "--env",
+        f"PGAPPNAME={application_name}",
+        "--env",
+        f"HOLDER_ROLE={role}",
+        "--env",
+        f"HOLDER_DATABASE={database}",
+        "--env",
+        f"HOLDER_SQL={sql}",
+        container_id,
+        "sh",
+        "-c",
+        HOLDER_SCRIPT,
+    ]
+
+
 class DockerClient:
     def __init__(self, runner: Runner | None = None) -> None:
         self.runner = runner
@@ -165,6 +197,27 @@ class DockerClient:
             "-",
         ]
         self._run(command, input=sql.encode(), what="the scenario SQL")
+
+    def start_lock_holder(
+        self,
+        container_id: str,
+        *,
+        sql: str,
+        role: str,
+        application_name: str,
+        database: str = "billing",
+    ) -> None:
+        self._run(
+            holder_command(
+                self._docker(),
+                container_id,
+                sql=sql,
+                role=role,
+                application_name=application_name,
+                database=database,
+            ),
+            what="the lock-holding session",
+        )
 
     def _ids(self, arguments: list[str]) -> list[str]:
         return self._lines([*arguments, "--format", "{{.ID}}"])

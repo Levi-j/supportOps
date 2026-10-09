@@ -46,7 +46,9 @@ def lab_database() -> Iterator[LabDatabase]:
     )
     with container:
         database = LabDatabase(
-            host=container.get_container_host_ip(), port=int(container.get_exposed_port(5432))
+            host=container.get_container_host_ip(),
+            port=int(container.get_exposed_port(5432)),
+            container_id=container.get_wrapped_container().id,
         )
         _wait_until_initialised(database)
         _admin(database, "CREATE DATABASE {} TEMPLATE {}", TEMPLATE_DATABASE, DATABASE)
