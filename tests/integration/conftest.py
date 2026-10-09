@@ -1,4 +1,5 @@
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -17,6 +18,8 @@ from testcontainers.core.container import DockerContainer
 
 from billing_api.config import BillingSettings
 from billing_api.main import create_app
+from tests.integration.orderflow import support as orderflow
+from tests.integration.orderflow.support import OrderflowDatabase
 from tests.integration.support import (
     DATABASE,
     PASSWORDS,
@@ -53,6 +56,65 @@ def lab_database() -> Iterator[LabDatabase]:
         _wait_until_initialised(database)
         _admin(database, "CREATE DATABASE {} TEMPLATE {}", TEMPLATE_DATABASE, DATABASE)
         yield database
+
+
+@pytest.fixture(scope="session")
+def orderflow_server() -> Iterator[OrderflowDatabase]:
+    admin_password = secrets.token_urlsafe(18)
+    container = (
+        DockerContainer(POSTGRES_IMAGE)
+        .with_env("POSTGRES_DB", orderflow.TEMPLATE_DATABASE)
+        .with_env("POSTGRES_USER", orderflow.ADMIN)
+        .with_env("POSTGRES_PASSWORD", admin_password)
+        .with_volume_mapping(str(orderflow.ROLE_SQL_DIR), "/setup", "ro")
+        .with_exposed_ports(5432)
+    )
+    with container:
+        host = container.get_container_host_ip()
+        server = OrderflowDatabase(
+            host="127.0.0.1" if host == "localhost" else host,
+            port=int(container.get_exposed_port(5432)),
+            database=orderflow.TEMPLATE_DATABASE,
+            admin_password=admin_password,
+            role_password=secrets.token_urlsafe(24),
+        )
+        _wait_until_accepting(server.url(orderflow.ADMIN))
+        with psycopg.connect(server.url(orderflow.ADMIN), autocommit=True) as connection:
+            connection.execute(orderflow.SCHEMA_FILE.read_text(encoding="utf-8"))
+            connection.execute(orderflow.SEED)
+        exit_code, output = container.exec(
+            [
+                "psql",
+                "--username",
+                orderflow.ADMIN,
+                "--dbname",
+                orderflow.TEMPLATE_DATABASE,
+                "--no-psqlrc",
+                "--set",
+                "ON_ERROR_STOP=1",
+                "--file",
+                f"/setup/{orderflow.ROLE_SQL_FILE}",
+            ]
+        )
+        assert exit_code == 0, output.decode(errors="replace")
+        with psycopg.connect(server.url(orderflow.ADMIN), autocommit=True) as connection:
+            connection.execute(
+                sql.SQL("ALTER ROLE {} PASSWORD {}").format(
+                    sql.Identifier(orderflow.READ_ONLY_ROLE), sql.Literal(server.role_password)
+                )
+            )
+        yield server
+
+
+@pytest.fixture
+def orderflow_db(orderflow_server: OrderflowDatabase) -> Iterator[OrderflowDatabase]:
+    name = f"orderflow_{uuid.uuid4().hex[:12]}"
+    admin = replace(orderflow_server, database="postgres")
+    _orderflow_admin(admin, "CREATE DATABASE {} TEMPLATE {}", name, orderflow.TEMPLATE_DATABASE)
+    _orderflow_admin(admin, "REVOKE ALL ON DATABASE {} FROM PUBLIC", name)
+    _orderflow_admin(admin, "GRANT CONNECT ON DATABASE {} TO {}", name, orderflow.READ_ONLY_ROLE)
+    yield replace(orderflow_server, database=name)
+    _orderflow_admin(admin, "DROP DATABASE {} WITH (FORCE)", name)
 
 
 @pytest.fixture
@@ -143,6 +205,25 @@ def _admin(database: LabDatabase, template: LiteralString, *names: str) -> None:
         database.url("lab_admin", database="postgres"), autocommit=True
     ) as connection:
         connection.execute(statement)
+
+
+def _orderflow_admin(database: OrderflowDatabase, template: LiteralString, *names: str) -> None:
+    statement = sql.SQL(template).format(*(sql.Identifier(name) for name in names))
+    with psycopg.connect(database.url(orderflow.ADMIN), autocommit=True) as connection:
+        connection.execute(statement)
+
+
+def _wait_until_accepting(url: str, timeout_seconds: float = 90) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            with psycopg.connect(url, connect_timeout=2) as connection:
+                connection.execute("SELECT 1")
+                return
+        except psycopg.Error:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.5)
 
 
 def _wait_until_initialised(database: LabDatabase, timeout_seconds: float = 90) -> None:

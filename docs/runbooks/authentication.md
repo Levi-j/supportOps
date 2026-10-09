@@ -1,40 +1,38 @@
 # Authentication troubleshooting
 
-Use this runbook when an API integration returns `401 Unauthorized` or `403 Forbidden`, or when you need to verify the credentials configured for SupportOps. The examples use the fictional billing API in the local lab.
+Use this runbook when an integration receives `401 Unauthorized` or `403 Forbidden`, or when you need to verify the credential SupportOps is using. The examples use the fictional [billing lab](../billing-lab.md); the [OrderFlow section](#bearer-tokens-orderflow) explains what changes for JWTs.
 
 ## How authentication works
 
-Every `/v1` endpoint requires an API key in the Authorization header:
+Every billing `/v1` endpoint expects an API key in a bearer Authorization header:
 
 ```text
 Authorization: Bearer bk_juniper01_lab_only_not_a_real_key
 ```
 
-Billing API keys begin with `bk_`, followed by 17–125 letters, digits, or underscores. The first 12 characters form the **key prefix** (for example, `bk_juniper01`). PostgreSQL stores this prefix and a SHA-256 hash of the complete key, not the key itself. On each request, the API uses the prefix to locate a record, then compares the hash of the submitted key with the stored hash.
+Billing keys begin with `bk_` and contain 20–128 characters in total. PostgreSQL stores a 12-character prefix and a SHA-256 hash, **not the complete key**. The API uses the prefix to find a candidate record and compares hashes in constant time.
 
-| Condition | HTTP response | `auth.rejected` reason |
+| Condition | Response | Server-side `auth.rejected` reason |
 | --- | --- | --- |
-| Authorization header is missing | `401` | `missing_header` |
-| Header or key format is invalid | `401` | `malformed_header` |
-| Key is not recognized | `401` | `unknown_key` |
-| Key has been revoked | `401` | `revoked_key` |
-| Key has expired | `401` | `expired_key` |
-| Key is valid, but its account is suspended | `403 ACCOUNT_SUSPENDED` | `account_suspended` |
+| Missing Authorization header | `401` | `missing_header` |
+| Malformed header or key | `401` | `malformed_header` |
+| Unknown key | `401` | `unknown_key` |
+| Revoked key | `401` | `revoked_key` |
+| Expired key | `401` | `expired_key` |
+| Valid key, suspended account | `403 ACCOUNT_SUSPENDED` | `account_suspended` |
 
-All key-related `401` responses use the same public error. The API records the more specific reason in its structured logs rather than disclosing it to an unauthenticated caller.
-
-A `401` means the credentials were not accepted; it does **not** establish whether the key is unknown, malformed, revoked, or expired. A `403` means the API identified the account but denied access. In the lab, a suspended account must be addressed through the account team, not by repeatedly changing keys.
+The public `401` response does not reveal why a key was rejected. The server logs the reason so it can be investigated without disclosing it to unauthenticated clients. A `403` means the account was identified but access was denied.
 
 ### Keys included in the lab
 
-| Prefix | Account | State |
+| Prefix | Fictional account | State |
 | --- | --- | --- |
 | `bk_juniper01` | Juniper Dental Group | Active |
 | `bk_juniper00` | Juniper Dental Group | Revoked |
 | `bk_kestrel01` | Kestrel Logistics | Active |
-| `bk_alderfin1` | Alder & Finch Studio | Key active; account suspended |
+| `bk_alderfin1` | Alder & Finch Studio | Account suspended |
 
-The full fictional keys end with `_lab_only_not_a_real_key`. They are development fixtures, not production credentials. The revoked Juniper key is seeded with a revocation date relative to when the lab database was created.
+These are public development fixtures, not real credentials. The full sample values are documented in the [billing lab reference](../billing-lab.md#lab-api-keys).
 
 ## Check a configured key
 
@@ -42,22 +40,15 @@ The full fictional keys end with `_lab_only_not_a_real_key`. They are developmen
 uv run supportops auth check
 ```
 
-The command performs three checks in order:
+SupportOps checks the key's format, makes one read-only `GET /v1/account` request, and—when `SUPPORTOPS_DB_URL` is configured—looks up the stored key prefix with `billing.api_key_status`.
 
-1. **Credential format.** It detects missing keys, accidental quotes, leading or trailing whitespace, embedded line breaks, incorrect prefixes, and invalid length or characters. Keys containing whitespace are not sent.
-2. **Live authentication.** It makes a single read-only `GET /v1/account` request with a generated ID beginning `supportops-auth-`. The response establishes whether this particular key was accepted by the API.
-3. **Database metadata.** When `SUPPORTOPS_DB_URL` is configured, it runs the predefined, read-only `billing.api_key_status` lookup for the key prefix.
-
-The output masks the complete credential, showing a value such as `bk_juniper01***`. It keeps observations separate from possible explanations.
-
-A shortened successful result might look like this:
+The output masks the key (`bk_juniper01***`) and separates observations from possible explanations. For example:
 
 ```text
 API key check for http://127.0.0.1:8001/
 Key: bk_juniper01*** from SUPPORTOPS_API_KEY
 Format: looks like a valid key
 Live request: GET /v1/account -> 200 OK
-Request ID: supportops-auth-bfdbf1690a79
 Result: AUTHENTICATED
 
 Evidence
@@ -65,18 +56,18 @@ Evidence
   - A matching key prefix exists in the database and its stored state is active.
 ```
 
-Request IDs, durations, and dates vary between runs.
+The request ID is generated for each run and appears in the complete output; use it to inspect the corresponding server logs.
 
 | Exit code | Meaning |
 | --- | --- |
-| `0` | The API authenticated the supplied key. |
-| `1` | Authentication was rejected or another diagnostic problem was found. |
-| `2` | No key is configured or the configuration is invalid. |
-| `3` | The API could not be reached. |
+| `0` | Authenticated |
+| `1` | Rejected or another diagnostic problem |
+| `2` | Missing credential or invalid configuration |
+| `3` | API unreachable |
 
 ### Check a different key
 
-Use `--key-env` to select an environment variable rather than passing a credential as a CLI argument. This example uses the lab's deliberately revoked key:
+Use `--key-env` to read a credential from an environment variable instead of passing it directly on the command line. This example uses the deliberately revoked *fictional* key:
 
 ```powershell
 $env:CUSTOMER_KEY = "bk_juniper00_lab_only_not_a_real_key"
@@ -84,95 +75,83 @@ uv run supportops auth check --key-env CUSTOMER_KEY
 Remove-Item Env:CUSTOMER_KEY
 ```
 
-For Linux or macOS, use `export CUSTOMER_KEY=...` and `unset CUSTOMER_KEY` instead. The literal value above is a public lab fixture; **do not paste a real customer's secret into a terminal command or shell history**. For real credentials, use your organization's approved secret-handling process.
+Expect a `401` and a nonzero exit code. If the database is available, the matching prefix should also show a revoked record. That is supporting evidence, **not proof that the complete submitted key matches the stored key**.
 
-The lab key should produce a `401` and a nonzero exit code. The database lookup reports a revoked record with the same prefix. That is strong supporting evidence, but it still does not prove that the complete value submitted was the stored key.
-
-A typical explanation is:
-
-```text
-Result: REJECTED (401)
-
-Evidence
-  - The API returned 401 Unauthorized.
-  - The database contains a revoked key with prefix bk_juniper00.
-
-Interpretation
-  - Revocation could explain the rejection if the supplied key is the
-    same key as the stored record. Confirm the server's rejection reason.
-
-Next steps
-  - Trace the request ID in the application logs.
-  - If revocation is confirmed, ask the account owner or an administrator
-    to issue a current key.
-```
+For real credentials, use an approved secret-handling method. Never paste customer secrets into shell history, tickets, or shared logs.
 
 ### Confirm the reason in the logs
 
-Copy the **request ID printed by your own `auth check` result** and trace it:
+Copy the request ID from your own `auth check` output:
 
 ```powershell
-uv run supportops logs trace supportops-auth-a6c389236b92
+uv run supportops logs trace YOUR_REQUEST_ID
 ```
 
-The ID above is illustrative. A matching trace for a revoked lab key contains events similar to:
+A revoked-key trace should contain events resembling:
 
 ```text
-+0 ms  WARNING  auth.rejected  API key rejected  [authentication]
++0 ms  WARNING  auth.rejected  API key rejected
        reason=revoked_key key_prefix=bk_juniper00
 +2 ms  INFO     http.request   GET /v1/account -> 401
 ```
 
-The `auth.rejected` event records what the API determined about the submitted credential. It is more specific evidence than a generic HTTP `401` or a prefix-only database lookup. See [Logs and request IDs](logs-and-request-ids.md) for other tracing examples.
+The `auth.rejected` reason is direct evidence of how the server handled that request, unlike a prefix-only database lookup. See [Logs and request IDs](logs-and-request-ids.md) for more tracing examples.
 
 ## Interpret the database evidence
 
-A lookup by prefix can establish which account and key record the prefix belongs to, along with creation, expiration, and revocation information. It **cannot establish that the full key presented by the client matches that record**. A typo after character 12 leaves the prefix unchanged but produces a different hash.
+A prefix lookup shows the stored record's account and lifecycle state. It cannot verify the rest of the submitted key; two different values can share the same first 12 characters.
 
-| API result | Database metadata | Interpretation |
+| API result | Database result | What to investigate |
 | --- | --- | --- |
-| `200` | Active | The API accepted the key; the two observations are consistent. |
-| `200` | Revoked or expired | The API and the diagnostic database may point to different environments. Verify configuration. |
-| `401` | No matching prefix | Check for typos, an outdated key, or an environment mismatch. |
-| `401` | Revoked or expired | The stored state may explain the failure; confirm the logged reason. |
-| `401` | Active | The full key may differ from the stored key, or the services may use different databases. Check the logs. |
-| `403 ACCOUNT_SUSPENDED` | Suspended account | Authentication identified the account, but account access is disabled. |
-| Any | Database unavailable | The lookup provides no corroborating evidence; use the API response and logs. |
+| `200` | Active | Observations agree |
+| `200` | Revoked or expired | API and SupportOps may be using different databases or environments |
+| `401` | Prefix not found | Typo, outdated credential, or wrong environment |
+| `401` | Revoked or expired | Stored state could explain the rejection; confirm the log reason |
+| `401` | Active | Full key may differ despite sharing the prefix; inspect the logs |
+| `403` | Suspended account | Account access needs an authorized account-team decision |
+| Any | Database unavailable | No database corroboration; rely on API and log evidence |
 
-To inspect the stored record directly, without supplying the complete key:
+To inspect a record without supplying a full key:
 
 ```powershell
 uv run supportops db run billing.api_key_status --param prefix=bk_juniper00
 ```
 
-The lookup reports the stored key's lifecycle state, not whether an arbitrary credential with that prefix would authenticate.
-
 ## Common configuration problems
 
-| Symptom | What to investigate |
+| Symptom | Next check |
 | --- | --- |
-| Key copied with literal surrounding quotes | `auth check` flags the quotes; the API may log `malformed_header`. |
-| Trailing space or newline | The format check identifies the extra whitespace and does not send the key. |
-| Key from another environment | A `401` and missing or inconsistent database metadata suggest checking the target URL and key source. |
-| Placeholder remains in `.env` | Check which configuration source is active with `supportops config show`; do not print the complete key. |
-| Integration still uses a rotated-out key | Look for `revoked_key` in the request trace. |
-| `SUPPORTOPS_API_URL` points to the wrong service | An unexpected response, including a `404` from `/v1/account`, may indicate an incorrect target. |
+| Quotes, spaces, or line breaks in the credential | `auth check` reports formatting problems; whitespace-bearing values aren't sent |
+| Key from another environment | Compare the target URL and credential source with `supportops config show` |
+| Integration still uses a rotated key | Find `revoked_key` in the request trace |
+| `GET /v1/account` returns an unexpected `404` | Check that `SUPPORTOPS_API_URL` points to the intended API |
+| API accepts a key but database metadata disagrees | Confirm that the API and diagnostic connection use the same environment |
 
-Environment-file parsers may remove ordinary quoting around values. Literal quote characters often come from copied shell variables or integrations, so check the actual configuration source rather than assuming the `.env` file is at fault.
+Environment-file parsers may remove ordinary quotes around values. If the CLI reports literal quote characters, check where the value originated before editing `.env`.
+
+## Bearer tokens (OrderFlow)
+
+The optional [OrderFlow integration](../integrations/orderflow.md) uses short-lived JWTs instead of billing API keys. Its `auth check` has three important differences:
+
+- **Unverified claims:** SupportOps decodes the JWT's subject, role, issuer, and timestamps locally but does not check its signature. Claims are labeled **unverified and untrusted**, never presented as established facts.
+- **HTTP evidence:** `GET /api/v1/users/me` establishes whether OrderFlow accepts the token. A `401` with `WWW-Authenticate: Bearer error="invalid_token"` means a token was presented and refused. OrderFlow does not log the specific rejection reason.
+- **No token database lookup:** OrderFlow does not store issued tokens, so there is no record to corroborate locally decoded claims.
+
+An expired claim or unexpected issuer is a possible explanation, not a confirmed cause. Never ask a customer to send their token. If an authorized test account is available, inspect that token through the approved process described in the integration guide.
 
 ## Handle credentials safely
 
-- Refer to credentials by masked prefix and request ID in support tickets. Never request or paste the full secret into a ticket, chat, or diagnostic command.
-- Use an approved secure method for providing secrets to an integration. Do not put production keys in shell history or source control.
-- Review raw logs, `curl -v` output, and exported files before sharing them. SupportOps redacts recognized sensitive patterns in its rendered output, but masking is not infallible.
-- Key issuance, rotation, and revocation belong to the account owner or an authorized administrator. Support engineers should not reactivate revoked credentials.
+- Record the environment, request ID, and **masked** key prefix in a support ticket—not the credential itself.
+- Keep production credentials out of command-line arguments, source control, and customer-facing reports.
+- Review exported JSON, raw Docker logs, and `curl -v` output before sharing. Pattern-based redaction cannot guarantee that every sensitive value is removed.
+- Leave key issuance, revocation, and account reactivation to authorized owners.
 
 ## Escalation
 
-**Account team:** Confirmed `403 ACCOUNT_SUSPENDED` or an account-access dispute.
+| Team | When to involve them |
+| --- | --- |
+| Account team | Confirmed suspended-account response or account-access dispute |
+| Engineering | API authentication contradicts reliable logs or database state, or `/v1/account` repeatedly returns `5xx` |
+| Security | A full credential has been exposed in an unauthorized location |
 
-**Engineering:** Authentication behavior conflicts with reliable database and log evidence; a previously revoked key appears to be accepted; or `/v1/account` repeatedly returns `5xx`.
-
-**Security:** A complete key has been exposed in a ticket, log, repository, or other unauthorized location. Follow the organization's revocation and incident process.
-
-For a useful handoff, include the timestamp, API URL or environment, masked key prefix, request ID, HTTP status, relevant `auth check` findings, and the server-side `auth.rejected` reason. Avoid including the credential itself.
+Include the timestamp, environment, masked prefix, request ID, HTTP response, relevant `auth check` findings, and any server-side `auth.rejected` reason. Never include the secret itself.

@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-from supportops.db.catalog import CHECKS
+from supportops.db.catalog import CHECKS, check_for_target
 from supportops.db.connection import DatabaseError
 from supportops.db.runner import MAX_ROWS, PlannedCheck, run_checks
 from supportops.health import run_health_check
@@ -14,11 +14,12 @@ from supportops.investigation.models import (
     InvoiceState,
     LiveEvidence,
     LogEvidence,
+    OrderState,
     OtherInvoices,
 )
 from supportops.logs.analysis import event_kind
 from supportops.settings import Settings
-from supportops.targets import TargetProfile
+from supportops.targets import BILLING, TargetProfile
 
 KEY_CHECK = "billing.api_key_status"
 INVOICE_CHECK = "billing.invoice_lookup"
@@ -34,6 +35,20 @@ CONDITION_TEXT = {
     "billing.payment_on_unpaid_invoice": "it has a successful payment but isn't marked paid",
     "billing.duplicate_payments": "it has more than one successful payment",
 }
+ORDER_CHECK = "orderflow.order_lookup"
+ORDER_CONSISTENCY_CHECKS = (
+    "orderflow.order_total_mismatch",
+    "orderflow.orders_without_items",
+    "orderflow.inventory_mismatch",
+)
+ORDER_EVENTS = frozenset({"order.placed", "order.confirmed", "order.cancelled"})
+ORDER_CONDITION_TEXT = {
+    "orderflow.order_total_mismatch": "its total differs from the sum of its items",
+    "orderflow.orders_without_items": "it has no items",
+    "stock_reservation_mismatch": "its ORDER_PLACED stock movements don't match the units ordered",
+    "stock_restoration_mismatch": "its ORDER_CANCELLED stock movements don't match its status",
+}
+GLOBAL_ORDER_CHECKS = ("orderflow.order_total_mismatch", "orderflow.orders_without_items")
 LONG_TRANSACTIONS_CHECK = "pg.long_transactions"
 BLOCKING_CHECK = "pg.blocking_sessions"
 LONG_TRANSACTION_SECONDS = 10
@@ -53,15 +68,22 @@ def collect_live(
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> LiveEvidence:
     live = LiveEvidence(collected_at=now(), database="not_needed")
-    plan = plan_checks_for(logs)
+    plan = plan_checks_for(logs, profile)
     if plan:
         _run_database_checks(live, plan, settings, use_database=use_database)
     invoice_id = logs.entities.invoice_id
-    if invoice_id is not None:
+    if invoice_id is not None and profile.check_pack == "billing":
         live.invoice = (
             invoice_state(invoice_id, logs.entities, live)
             if live.database == "checked"
             else InvoiceState(invoice_id=invoice_id, lookup="unavailable")
+        )
+    order_id = logs.entities.order_id
+    if order_id is not None and profile.check_pack == "orderflow":
+        live.order = (
+            order_state(order_id, live)
+            if live.database == "checked"
+            else OrderState(order_id=order_id, lookup="unavailable")
         )
     if needs_health_check(logs):
         health_settings = settings if use_database else settings.model_copy(update={"db_url": None})
@@ -93,7 +115,24 @@ def needs_health_check(logs: LogEvidence) -> bool:
     return status == 503 and not names & LOCK_EVENTS
 
 
-def plan_checks_for(logs: LogEvidence) -> list[PlannedCheck]:
+def plan_checks_for(logs: LogEvidence, profile: TargetProfile = BILLING) -> list[PlannedCheck]:
+    plan = _orderflow_plan(logs) if profile.check_pack == "orderflow" else _billing_plan(logs)
+    for item in plan:
+        check_for_target(item.check.name, profile.check_packs, profile.name)
+    return plan
+
+
+def _orderflow_plan(logs: LogEvidence) -> list[PlannedCheck]:
+    order_id = logs.entities.order_id
+    if order_id is None:
+        return []
+    plan = [PlannedCheck(CHECKS[ORDER_CHECK], {"id": int(order_id)})]
+    if touches_payments(logs) or event_names(logs) & ORDER_EVENTS:
+        plan.extend(PlannedCheck(CHECKS[name]) for name in ORDER_CONSISTENCY_CHECKS)
+    return plan
+
+
+def _billing_plan(logs: LogEvidence) -> list[PlannedCheck]:
     entities = logs.entities
     plan = []
     if entities.key_prefix is not None:
@@ -257,4 +296,80 @@ def _compare_payment_ids(state: InvoiceState, live: LiveEvidence, logged: list[s
         state.contradictions.append(
             f"The request's logs record payment {', '.join(missing)}, which isn't among the "
             f"successful payments the database lists for {state.invoice_id}."
+        )
+
+
+def derive_order_conditions(record: dict[str, Any]) -> list[str]:
+    conditions = []
+    total = record.get("total_amount")
+    items_total = record.get("items_total")
+    if total is not None and items_total is not None and total != items_total:
+        conditions.append("orderflow.order_total_mismatch")
+    if int(record.get("item_count") or 0) == 0:
+        conditions.append("orderflow.orders_without_items")
+    ordered = int(record.get("units_ordered") or 0)
+    reserved = int(record.get("units_reserved") or 0)
+    restored = int(record.get("units_restored") or 0)
+    if reserved != ordered:
+        conditions.append("stock_reservation_mismatch")
+    if restored != (reserved if record.get("status") == "CANCELLED" else 0):
+        conditions.append("stock_restoration_mismatch")
+    return conditions
+
+
+def order_state(order_id: str, live: LiveEvidence) -> OrderState:
+    lookup = live.check(ORDER_CHECK)
+    if lookup is None or lookup.status == "error":
+        return OrderState(
+            order_id=order_id,
+            lookup="unavailable",
+            notes=[f"{ORDER_CHECK} didn't run, so nothing is known about order {order_id}."],
+        )
+    rows = [row for row in lookup.rows if str(row.get("order_id")) == order_id]
+    if not rows:
+        return OrderState(
+            order_id=order_id,
+            lookup="not_found",
+            notes=[f"No order with ID {order_id} exists in the database now."],
+        )
+    state = OrderState(
+        order_id=order_id,
+        lookup="found",
+        record=rows[0],
+        conditions=derive_order_conditions(rows[0]),
+    )
+    for name in GLOBAL_ORDER_CHECKS:
+        _compare_order_with_global_check(state, live, name)
+    return state
+
+
+def _compare_order_with_global_check(state: OrderState, live: LiveEvidence, name: str) -> None:
+    result = live.check(name)
+    derived = name in state.conditions
+    if result is None or result.status == "error":
+        if derived:
+            state.uncorroborated.append(name)
+            state.notes.append(
+                f"{name} {'did not run' if result is None else 'could not run'}, so it can't "
+                f"corroborate order {state.order_id}'s record."
+            )
+        return
+    listed = state.order_id in {str(row.get("order_id")) for row in result.rows}
+    if listed and derived:
+        state.corroborated_by.append(name)
+    elif listed:
+        state.contradictions.append(
+            f"{name} lists order {state.order_id}, but the order's own record doesn't show that "
+            "condition. The data may have changed between the two queries."
+        )
+    elif derived and result.truncated:
+        state.uncorroborated.append(name)
+        state.notes.append(
+            f"{name} returned only its first {MAX_ROWS} rows, which don't include order "
+            f"{state.order_id}; the order's own record decides."
+        )
+    elif derived:
+        state.contradictions.append(
+            f"{name} doesn't list order {state.order_id}, although the order's own record shows "
+            "that condition. The data may have changed between the two queries."
         )

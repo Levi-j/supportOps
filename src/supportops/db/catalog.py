@@ -47,7 +47,7 @@ class Parameter:
 @dataclass(frozen=True)
 class Check:
     name: str
-    pack: Literal["generic", "billing"]
+    pack: Literal["generic", "billing", "orderflow"]
     kind: CheckKind
     description: str
     sql: LiteralString
@@ -274,6 +274,83 @@ WHERE invoice.id = %(id)s OR invoice.number = %(number)s
 ORDER BY invoice.account_id, invoice.id
 """
 
+_ORDERFLOW_INVENTORY_SQL: LiteralString = """
+SELECT coalesce(item.product_id, movement.product_id) AS product_id,
+       product.sku,
+       item.quantity_on_hand,
+       coalesce(movement.movement_total, 0)::bigint AS movement_total,
+       coalesce(movement.movements, 0) AS movements
+FROM public.inventory_items AS item
+FULL JOIN (
+    SELECT product_id, sum(quantity_change) AS movement_total, count(*) AS movements
+    FROM public.inventory_movements
+    GROUP BY product_id
+) AS movement ON movement.product_id = item.product_id
+LEFT JOIN public.products AS product
+  ON product.id = coalesce(item.product_id, movement.product_id)
+WHERE item.product_id IS NULL
+   OR item.quantity_on_hand <> coalesce(movement.movement_total, 0)
+ORDER BY 1
+"""
+
+_ORDERFLOW_TOTAL_MISMATCH_SQL: LiteralString = """
+SELECT customer_order.id AS order_id,
+       customer_order.status,
+       customer_order.total_amount,
+       coalesce(sum(item.line_total), 0) AS items_total,
+       count(item.id) AS item_count
+FROM public.orders AS customer_order
+LEFT JOIN public.order_items AS item ON item.order_id = customer_order.id
+GROUP BY customer_order.id
+HAVING customer_order.total_amount <> coalesce(sum(item.line_total), 0)
+ORDER BY customer_order.id
+"""
+
+_ORDERFLOW_WITHOUT_ITEMS_SQL: LiteralString = """
+SELECT customer_order.id AS order_id,
+       customer_order.status,
+       customer_order.total_amount,
+       customer_order.created_at
+FROM public.orders AS customer_order
+WHERE NOT EXISTS (
+    SELECT 1 FROM public.order_items AS item WHERE item.order_id = customer_order.id
+)
+ORDER BY customer_order.id
+"""
+
+_ORDERFLOW_ORDER_LOOKUP_SQL: LiteralString = """
+SELECT customer_order.id AS order_id,
+       customer_order.customer_id,
+       customer_order.status,
+       customer_order.total_amount,
+       customer_order.version,
+       items.item_count,
+       items.items_total,
+       items.units_ordered,
+       coalesce(movements.units_reserved, 0)::bigint AS units_reserved,
+       coalesce(movements.units_restored, 0)::bigint AS units_restored,
+       customer_order.idempotency_key IS NOT NULL AS has_idempotency_key,
+       customer_order.created_at,
+       customer_order.updated_at
+FROM public.orders AS customer_order
+CROSS JOIN LATERAL (
+    SELECT count(*) AS item_count,
+           coalesce(sum(item.line_total), 0) AS items_total,
+           coalesce(sum(item.quantity), 0)::bigint AS units_ordered
+    FROM public.order_items AS item
+    WHERE item.order_id = customer_order.id
+) AS items
+CROSS JOIN LATERAL (
+    SELECT -sum(movement.quantity_change)
+               FILTER (WHERE movement.reason = 'ORDER_PLACED') AS units_reserved,
+           sum(movement.quantity_change)
+               FILTER (WHERE movement.reason = 'ORDER_CANCELLED') AS units_restored
+    FROM public.inventory_movements AS movement
+    WHERE movement.order_id = customer_order.id
+) AS movements
+WHERE customer_order.id = %(id)s
+"""
+
 CATALOG: tuple[Check, ...] = (
     Check(
         name="db.connectivity",
@@ -396,6 +473,53 @@ CATALOG: tuple[Check, ...] = (
         ok_message="Matching invoices: {count}.",
         problem_message="No invoice matches {lookup}.",
     ),
+    Check(
+        name="orderflow.inventory_mismatch",
+        pack="orderflow",
+        kind="consistency",
+        description="Products whose stock on hand differs from the sum of their movements",
+        sql=_ORDERFLOW_INVENTORY_SQL,
+        ok_message="Every product's stock on hand matches its movement history.",
+        problem_message="Products whose stock differs from their movement history: {count}.",
+    ),
+    Check(
+        name="orderflow.order_total_mismatch",
+        pack="orderflow",
+        kind="consistency",
+        description="Orders whose total differs from the sum of their item line totals",
+        sql=_ORDERFLOW_TOTAL_MISMATCH_SQL,
+        ok_message="Every order total matches the sum of its items.",
+        problem_message="Orders whose total differs from the sum of their items: {count}.",
+    ),
+    Check(
+        name="orderflow.orders_without_items",
+        pack="orderflow",
+        kind="consistency",
+        description="Orders that have no order items",
+        sql=_ORDERFLOW_WITHOUT_ITEMS_SQL,
+        ok_message="Every order has at least one item.",
+        problem_message="Orders without items: {count}.",
+    ),
+    Check(
+        name="orderflow.order_lookup",
+        pack="orderflow",
+        kind="lookup",
+        description="Status, totals, items and stock movements of one order",
+        sql=_ORDERFLOW_ORDER_LOOKUP_SQL,
+        parameters=(
+            Parameter(
+                name="id",
+                description="An order ID",
+                kind="integer",
+                required=True,
+                minimum=1,
+                maximum=9_223_372_036_854_775_807,
+                example="42",
+            ),
+        ),
+        ok_message="Found order {id}.",
+        problem_message="No order has ID {id}.",
+    ),
 )
 
 CHECKS: dict[str, Check] = {check.name: check for check in CATALOG}
@@ -407,6 +531,18 @@ def get_check(name: str) -> Check:
         raise ConfigError(
             f"Unknown check '{name}'.",
             hint="List the available checks with 'supportops db checks'.",
+        )
+    return check
+
+
+def check_for_target(name: str, packs: frozenset[str], target: str) -> Check:
+    check = get_check(name)
+    if check.pack not in packs:
+        raise ConfigError(
+            f"{name} belongs to the {check.pack} checks and can't run against the '{target}' "
+            "target.",
+            hint="Each target only runs the generic checks and its own pack. Check "
+            "SUPPORTOPS_TARGET, or list the checks with 'supportops db checks'.",
         )
     return check
 

@@ -175,6 +175,8 @@ def _summary(investigation: Investigation) -> list[str]:
         ("API key prefix", entities.key_prefix),
         ("Invoice", entities.invoice_id),
         ("Payments", ", ".join(entities.payment_ids)),
+        ("Order", entities.order_id),
+        ("Product", entities.product_id),
     ):
         if value:
             rows.append((label, _code(value)))

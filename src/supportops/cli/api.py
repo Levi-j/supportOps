@@ -20,7 +20,12 @@ from supportops.http_checks import (
 from supportops.latency import MAX_REQUESTS, LatencyReport, measure_latency
 from supportops.settings import load_settings
 from supportops.targets import get_target
-from supportops.write_guard import check_write_request, confirm_lab_service, is_write
+from supportops.write_guard import (
+    check_method_allowed,
+    check_write_request,
+    confirm_lab_service,
+    is_write,
+)
 
 METHODS = ("GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE")
 MAX_BODY_BYTES = 1_000_000
@@ -79,6 +84,7 @@ def request_command(
     settings = load_settings(get_state(ctx).env_file).settings
     profile = get_target(settings.target)
     method = _checked_method(method)
+    check_method_allowed(method, profile)
     _check_path(path)
     if is_write(method):
         check_write_request(method, confirmed=yes, api_url=str(settings.api_url), profile=profile)

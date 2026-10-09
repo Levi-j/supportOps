@@ -762,11 +762,18 @@ RULES: tuple[Callable[[Facts], Finding | None], ...] = (
 FALLBACK_RULES: tuple[Callable[[Facts], Finding | None], ...] = (http_error_unexplained,)
 
 
-def apply_rules(facts: Facts) -> list[Finding]:
-    findings = [result for rule in RULES if (result := rule(facts)) is not None]
+Rule = Callable[[Facts], Finding | None]
+
+
+def apply_rules(
+    facts: Facts,
+    rules: tuple[Rule, ...] = RULES,
+    fallback: tuple[Rule, ...] = FALLBACK_RULES,
+) -> list[Finding]:
+    findings = [result for rule in rules if (result := rule(facts)) is not None]
     if findings:
         return findings
-    return [result for rule in FALLBACK_RULES if (result := rule(facts)) is not None]
+    return [result for rule in fallback if (result := rule(facts)) is not None]
 
 
 def _note_lab_faults(facts: Facts, assessment: Assessment) -> None:

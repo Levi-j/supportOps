@@ -133,7 +133,7 @@ def test_db_checks_show_sql() -> None:
 def test_db_checks_json() -> None:
     listing = json.loads(invoke("db", "checks", "--json").stdout)
 
-    assert len(listing["checks"]) == 10
+    assert len(listing["checks"]) == 14
     assert listing["checks"][0]["sql"] is None
 
 

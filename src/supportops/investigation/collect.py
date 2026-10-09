@@ -35,7 +35,9 @@ STARTUP_EVENT = "app.started"
 
 _INVOICE_PATH = re.compile(r"/v1/invoices/([^/]+)")
 _CUSTOMER_PATH = re.compile(r"/v1/customers/([^/]+)")
+ORDER_PATH = re.compile(r"/api/v1/(?:admin/)?orders/([^/]+)")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_NUMERIC_ID = re.compile(r"[1-9][0-9]{0,18}")
 
 
 def _catalog_pattern(check: str, parameter: str) -> re.Pattern[str]:
@@ -158,6 +160,8 @@ def extract_entities(request_trace: RequestTrace) -> tuple[Entities, list[str]]:
         "invoice": [],
         "customer": [],
         "payment": [],
+        "order": [],
+        "product": [],
     }
     rejected: set[str] = set()
     for step in request_trace.steps:
@@ -169,11 +173,14 @@ def extract_entities(request_trace: RequestTrace) -> tuple[Entities, list[str]]:
         _add(found, rejected, "customer", event.extra.get("customer_id"), _IDENTIFIER)
         _add(found, rejected, "customer", _path_id(_CUSTOMER_PATH, event.path), _IDENTIFIER)
         _add(found, rejected, "payment", event.extra.get("payment_id"), _IDENTIFIER)
+        _add(found, rejected, "order", _whole_number(event.extra.get("orderId")), _NUMERIC_ID)
+        _add(found, rejected, "order", _path_id(ORDER_PATH, event.path), _NUMERIC_ID)
+        _add(found, rejected, "product", _whole_number(event.extra.get("productId")), _NUMERIC_ID)
     notes = [
         f"Ignored a value for the {label} that doesn't have the expected format."
         for label in sorted(rejected)
     ]
-    for label in ("account", "API key prefix", "invoice", "customer"):
+    for label in ("account", "API key prefix", "invoice", "customer", "order", "product"):
         if len(found[label]) > 1:
             notes.append(
                 f"The entries for this request name more than one {label} "
@@ -186,6 +193,8 @@ def extract_entities(request_trace: RequestTrace) -> tuple[Entities, list[str]]:
             invoice_id=_single(found["invoice"]),
             customer_id=_single(found["customer"]),
             payment_ids=found["payment"],
+            order_id=_single(found["order"]),
+            product_id=_single(found["product"]),
         ),
         notes,
     )
@@ -396,6 +405,12 @@ def _add(
 def _path_id(pattern: re.Pattern[str], path: str | None) -> str | None:
     match = pattern.match(path) if path else None
     return match.group(1) if match else None
+
+
+def _whole_number(value: object) -> object:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return value
 
 
 def _single(values: list[str]) -> str | None:

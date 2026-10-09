@@ -1,51 +1,34 @@
 # Database diagnostics
 
-Use this runbook when a billing issue may involve PostgreSQL: an invoice total looks wrong, a payment is missing, a request times out with `503 DATABASE_BUSY`, or an API outage requires a closer look at the database.
+Use this runbook when a billing issue may involve PostgreSQL: an unexpected invoice total, a missing payment, a `503 DATABASE_BUSY` response, or requests failing while the API itself remains available.
 
-The procedures below are **read-only**. They inspect records, transactions, and database activity without correcting data, changing permissions, or interfering with active sessions.
+**The diagnostic workflow is read-only.** Collect evidence first. Data repairs, role changes, and decisions about active database sessions belong to authorized engineers or DBAs.
 
 ## Connection and safety model
 
-SupportOps loads its PostgreSQL connection string from `SUPPORTOPS_DB_URL`, either from the environment or from the local `.env` file. It does not accept a password or connection string as a CLI argument.
-
-The lab uses a connection of this form:
+SupportOps reads `SUPPORTOPS_DB_URL` from the environment or your local `.env`; it does not accept database passwords on the command line. The billing lab uses a connection shaped like:
 
 ```text
 postgresql://supportops_ro:<password>@127.0.0.1:5433/billing
 ```
 
-Each diagnostic connection identifies itself as `supportops` through PostgreSQL's `application_name`. Checks run in separate read-only transactions, with `default_transaction_read_only=on`, a five-second statement timeout, and a connection timeout controlled by `SUPPORTOPS_CONNECT_TIMEOUT_SECONDS`. The connection is closed when the check finishes.
-
-The CLI executes **only named queries from its diagnostic catalog**. There is no free-form SQL execution command, and user-supplied values are bound as parameters rather than concatenated into SQL.
-
-PostgreSQL enforces the read-only transaction setting even if a privileged account is configured. Integration tests verify that attempts to write within these transactions fail for both `supportops_ro` and the lab administrator. This protection complements, rather than replaces, a least-privilege database role.
+Every check runs predefined SQL in a read-only PostgreSQL transaction with bound parameters, a five-second statement timeout, and the connection name `supportops`. There is no arbitrary-SQL command. These protections complement the database role's permissions; they do not replace them.
 
 ### Least-privilege access
 
-The local `supportops_ro` role has `SELECT` access to billing data and belongs to `pg_monitor`, allowing it to inspect the activity and locks of other sessions. It has no permission to modify billing records, and its sessions default to read-only.
+The lab's `supportops_ro` role can read billing tables but cannot modify them. It also has `pg_monitor`, which allows the diagnostic session checks to see activity from other PostgreSQL roles.
 
-Run `db.connectivity` to check which role is actually connected:
+Verify the current connection:
 
 ```powershell
 uv run supportops db run db.connectivity
 ```
 
-The check warns about privileges that are inappropriate for a support account:
+The check warns if the account is a superuser, has administrative attributes or table-write privileges, or is not operating read-only. It does **not** attempt to fix permissions.
 
-| Finding | Why it matters |
-| --- | --- |
-| Superuser access | The credentials could be used outside SupportOps to change or delete data. |
-| Administrative attributes | The role could create roles or databases, bypass row-level security, or start replication. |
-| Write access on tables | The role has privileges such as `INSERT`, `UPDATE`, `DELETE`, or `TRUNCATE`. |
-| Session is not read-only | The connection does not have the expected transaction protection. |
-
-A privilege warning produces a `WARN` finding and exit code `1`; SupportOps does not modify the role. Arrange appropriate read-only credentials before continuing with sensitive investigations.
-
-Without sufficient monitoring rights, PostgreSQL restricts visibility into other sessions. SupportOps reports the relevant activity checks as **incomplete** rather than treating limited visibility as evidence that no problems exist.
+Without `pg_monitor`, PostgreSQL may hide other roles' sessions. Activity checks then mark the evidence **incomplete**, not clean. The [OrderFlow integration](../integrations/orderflow.md) intentionally makes that monitoring grant optional.
 
 ## Available checks
-
-List the catalog, or inspect a predefined query without executing it:
 
 ```powershell
 uv run supportops db checks
@@ -54,18 +37,18 @@ uv run supportops db checks billing.api_key_status --show-sql
 
 | Check | Purpose | Parameter |
 | --- | --- | --- |
-| `db.connectivity` | Server version, connected role, read-only state, and privilege warnings | None |
-| `pg.connections` | Database sessions grouped by role, application, and state | None |
-| `pg.long_transactions` | Open transactions exceeding the specified duration | `min_seconds` (default `60`) |
-| `pg.blocking_sessions` | Sessions waiting for locks and the sessions blocking them | None |
-| `billing.invoice_total_mismatch` | Stored invoice totals that disagree with invoice-line totals | None |
-| `billing.paid_invoice_without_payment` | Paid invoices without a successful payment | None |
-| `billing.payment_on_unpaid_invoice` | Successful payments on invoices not marked paid | None |
-| `billing.duplicate_payments` | More than one successful payment associated with an invoice | None |
-| `billing.api_key_status` | Account and lifecycle metadata for an API-key prefix | `prefix` (required) |
-| `billing.invoice_lookup` | Invoice status, totals, and payment counts | `id` **or** `number` |
+| `db.connectivity` | Connection, current role, and permission safety | — |
+| `pg.connections` | Sessions grouped by role, application, and state | — |
+| `pg.long_transactions` | Transactions open beyond a threshold | `min_seconds`, default `60` |
+| `pg.blocking_sessions` | Waiting sessions and their blockers | — |
+| `billing.invoice_total_mismatch` | Invoice totals that differ from line totals | — |
+| `billing.paid_invoice_without_payment` | Paid invoices with no successful payment | — |
+| `billing.payment_on_unpaid_invoice` | Successful payment on an unpaid invoice | — |
+| `billing.duplicate_payments` | Multiple successful payments for one invoice | — |
+| `billing.api_key_status` | Lifecycle and account metadata for a key prefix | `prefix` required |
+| `billing.invoice_lookup` | Invoice, line, and payment details | `id` or `number` |
 
-Run one or several checks by name, or run all checks that do not need an unavailable lookup value:
+Run all applicable non-parameterized checks or select individual checks:
 
 ```powershell
 uv run supportops db run --all
@@ -73,60 +56,51 @@ uv run supportops db run billing.invoice_lookup --param number=INV-1003
 uv run supportops db run pg.long_transactions pg.blocking_sessions --param min_seconds=30
 ```
 
-With `--all`, parameter-dependent checks are reported as `SKIPPED` when their required values are absent. SupportOps does not guess an invoice ID or key prefix.
+`--all` marks lookups without required parameters as `SKIPPED`; it never guesses which invoice or key to inspect. The target determines which checks are available: billing and OrderFlow can each run the generic PostgreSQL pack plus **their own** application-specific checks. Cross-target selections are rejected before connecting. See the [OrderFlow guide](../integrations/orderflow.md#database-checks) for its four order and inventory checks.
 
 ### Understand the results
 
 | Status | Meaning |
 | --- | --- |
-| `PASS` | The check completed and found no problem under its criteria. |
-| `FAIL` | It detected an inconsistency, or a requested lookup returned no match. |
-| `WARN` | The configured database account has excessive privileges or another safety concern. |
-| `INFO` | Informational evidence, such as a matching invoice or session summary. |
-| `ERROR` | The check could not finish; no reliable conclusion is available. |
-| `SKIPPED` | A required lookup parameter was not supplied. |
+| `PASS` | The check completed and found no matching problem within its scope |
+| `FAIL` | An inconsistency was found, or a requested record wasn't found |
+| `WARN` | Safety concern such as excessive account privileges |
+| `INFO` | Informational evidence, including limited session visibility |
+| `SKIPPED` | Required lookup parameter wasn't supplied |
+| `ERROR` | Check couldn't complete; no clean result can be inferred |
 
-Exit codes are `0` for a successful run without failures or warnings, `1` for a `FAIL` or `WARN`, `2` for invalid usage or configuration, and `3` when a check cannot be completed. In particular, **`FAIL` describes a finding; `ERROR` describes missing evidence**. Do not treat them as interchangeable.
-
-Use `--json` for the complete structured results, or `--show-sql` to display the catalog query alongside the result. Check results include a duration and relevant rows; terminal output may abbreviate large result sets.
+Exit codes are `0` for no reported failures or warnings, `1` for `FAIL` or `WARN`, `2` for invalid usage or configuration, and `3` when a check cannot be completed. **A `FAIL` is a finding; an `ERROR` is a gap in evidence.** Use `--json` for structured results, including completeness flags and returned rows.
 
 ### Parameter binding
 
-The SQL is fixed in the catalog. Parameters appear as placeholders:
+User values are validated and passed separately from the SQL, for example:
 
 ```sql
 WHERE api_key.key_prefix = %(prefix)s
 ```
 
-For example:
-
 ```powershell
 uv run supportops db run billing.api_key_status --param prefix=bk_juniper00
 ```
 
-SupportOps validates the supplied prefix (exactly 12 permitted characters) and passes it to PostgreSQL separately from the SQL. This prevents the value from changing the structure of the query. The parameter takes only a **prefix**, never a full API key.
-
-Unknown check names, invalid parameters, and conflicting invoice identifiers are rejected before the database query runs.
+This lookup accepts a **12-character prefix**, not a full API key. Unknown checks, invalid parameters, and conflicting invoice identifiers are rejected before executing SQL.
 
 ## Investigate an invoice or payment
 
 ### Look up the reported invoice
 
-Start with the identifier from the customer or API response:
+Start with an ID or invoice number from the customer's report:
 
 ```powershell
 uv run supportops db run billing.invoice_lookup --param number=INV-1003
 ```
 
-A shortened example from the seeded lab is:
+For the seeded lab, the result includes values such as:
 
 ```text
-INFO  billing.invoice_lookup  Matching invoices: 1
-
 invoice_id          inv_juniper_1003
 number              INV-1003
 account_id          acct_juniper
-account_name        Juniper Dental Group
 status              open
 currency            EUR
 total_cents         14900
@@ -135,9 +109,9 @@ succeeded_payments  0
 failed_payments     1
 ```
 
-Amounts are stored in **integer cents**: `14900` means EUR 149.00. In this example, the invoice is open and its stored total matches its lines. There is one failed payment attempt and no successful payment recorded. That explains what the database contains; it does not, by itself, establish why the attempt failed.
+Amounts are stored in integer cents: `14900` means EUR 149.00. This snapshot shows one failed payment attempt and no successful payment; it does **not** explain why the attempt failed.
 
-Invoice numbers are unique **within an account**, not necessarily across the entire database. If a number matches more than one account, use `account_id` to identify the relevant record before drawing conclusions. A lookup with no match returns `FAIL` and exit code `1`.
+Invoice numbers are unique within an account, not necessarily across the whole database. If a number matches multiple accounts, use the account ID to identify the right record.
 
 ### Check for inconsistencies
 
@@ -145,37 +119,26 @@ Invoice numbers are unique **within an account**, not necessarily across the ent
 uv run supportops db run billing.invoice_total_mismatch billing.paid_invoice_without_payment billing.payment_on_unpaid_invoice billing.duplicate_payments
 ```
 
-A healthy seed should pass all four checks. If one fails, inspect the affected invoice IDs and the accompanying evidence:
-
-| Failed check | What the result establishes | Usual escalation |
+| Finding | What it establishes | Escalation |
 | --- | --- | --- |
-| `invoice_total_mismatch` | The stored invoice total does not match its line items. | Engineering |
-| `paid_invoice_without_payment` | An invoice is marked paid without a corresponding successful payment. | Engineering / finance |
-| `payment_on_unpaid_invoice` | A successful payment exists, but the invoice is not marked paid. | Engineering; assess possible customer impact promptly |
-| `duplicate_payments` | Multiple successful payment records exist for one invoice. | Engineering / finance; check potential duplicate charges |
+| Total mismatch | Stored amount disagrees with invoice lines | Engineering |
+| Paid without payment | Invoice is paid without a successful payment record | Engineering / finance |
+| Payment on unpaid invoice | Successful payment exists while invoice remains unpaid | Engineering; assess customer impact |
+| Duplicate payments | Multiple successful payments are recorded | Engineering / finance; assess duplicate charges |
 
-Do not assume a cause from a consistency check alone. Correlate invoice IDs, payment events, timestamps, and request IDs using the [logs runbook](logs-and-request-ids.md). A `500` response, for example, does not prove that the underlying transaction made no changes.
+Use the invoice ID, request IDs, timestamps, and [application logs](logs-and-request-ids.md) to investigate causes. A `500` does **not** guarantee that no data was written. Likewise, current database state does not necessarily describe what existed when an earlier request ran.
 
-Records added during your own lab testing are included in these checks. They are not automatically considered defects merely because they were not part of the original seed. **Do not reset the database to run a diagnostic.**
+Don't reset the database just to get a clean diagnostic result. Records created during legitimate local testing are part of the current state.
 
 ## Investigate database sessions and locks
 
 ### Review current connections
 
-`pg.connections` summarizes information from `pg_stat_activity`:
-
 ```powershell
 uv run supportops db run pg.connections
 ```
 
-| Field | Meaning |
-| --- | --- |
-| `role` | PostgreSQL user associated with the session |
-| `application` | The application's reported name, such as `billing-api` or `supportops` |
-| `state` | `active`, `idle`, or `idle in transaction` |
-| `sessions` | Number of sessions in that group |
-
-An `idle` session is waiting for work and does not necessarily have an open transaction. `idle in transaction` is different: a transaction remains open even though the session is not currently running a query. Because the lab's billing API opens a connection per request, a quiet lab may have few sessions to report.
+The check summarizes role, application, state, and session count. An `idle` connection is simply waiting for work; `idle in transaction` means a transaction remains open and may be retaining locks.
 
 ### Find long-running transactions
 
@@ -183,9 +146,7 @@ An `idle` session is waiting for work and does not necessarily have an open tran
 uv run supportops db run pg.long_transactions --param min_seconds=30
 ```
 
-This check looks for transactions that have been open longer than the threshold. It reports their age, state, lock count, and a short excerpt of the last query. A connection that is simply idle **without** an open transaction is not listed.
-
-Long-lived `idle in transaction` sessions deserve particular attention. Depending on what they have done, they may retain locks and prevent other operations from progressing. In the billing API, a blocked write can eventually return `503 DATABASE_BUSY` when the lock timeout is reached, even while ordinary invoice reads continue.
+This reports open transactions older than the threshold, including their age, state, lock count, and a shortened query excerpt. A long-lived `idle in transaction` session deserves attention, but its age alone does not prove that it is blocking another request.
 
 ### Identify blocking sessions
 
@@ -193,17 +154,13 @@ Long-lived `idle in transaction` sessions deserve particular attention. Dependin
 uv run supportops db run pg.blocking_sessions
 ```
 
-The check uses PostgreSQL's `pg_blocking_pids()` to pair each waiting session with its blocker. It reports relevant application names, session states, transaction ages, wait information, and limited excerpts of query text. Query excerpts are truncated to 120 characters and passed through SupportOps' redaction logic; review them before sharing because masking cannot cover every possible literal.
+Using PostgreSQL's `pg_blocking_pids()`, this check identifies sessions **currently waiting** and the sessions blocking them. It provides application names, transaction ages, wait information, and truncated query excerpts. The excerpts are redacted where recognizable patterns match; review them before sharing.
 
-A common pattern is an API request waiting behind a maintenance script or console session left `idle in transaction`. The check identifies what PostgreSQL is observing; it does not determine whether the blocking work is safe to cancel.
-
-**Timing matters.** `pg.blocking_sessions` only has rows while a session is *waiting*. The billing API gives up after its lock timeout (3 seconds by default), and its waiting session then disappears. A check run after the customer's `503` shows the blocker in `pg.long_transactions`, but usually an empty `pg.blocking_sessions`. That doesn't mean there is no blocker. To see the relationship itself, run `pg.blocking_sessions` while a blocked request is in progress.
-
-A waiting row lock appears as `Lock:transactionid` in `waiting_for`. PostgreSQL stores row locks on the row, so the waiting session waits for the holder's transaction to end.
+**Timing matters:** when the billing API's three-second lock timeout expires, the waiting query disappears. A later `pg.blocking_sessions` check may be empty even though the blocking transaction remains visible in `pg.long_transactions`. A row-lock wait often appears as `Lock:transactionid`.
 
 ### Practise it safely: INC-005
 
-[INC-005](../incidents/INC-005-blocked-writes.md) reproduces a blocked payment in the disposable scenario lab, never in the persistent `supportops` lab:
+[INC-005](../incidents/INC-005-blocked-writes.md) demonstrates lock contention in the disposable scenario environment—not the persistent billing database.
 
 ```powershell
 uv run supportops-lab start INC-005
@@ -213,50 +170,38 @@ uv run supportops --env-file .lab\supportops-scenario\supportops.env investigate
 uv run supportops-lab reset
 ```
 
-The scenario holds a row lock from a session named `invoice-backfill` that stays `idle in transaction`. The customer's payments return `503 DATABASE_BUSY` with `Retry-After: 5`, while reading the same invoice returns `200`. That is MVCC in action: plain reads use the last committed row version and don't wait for row locks.
-
-`supportops-lab status` shows the lock wait the harness captured while the first payment was waiting. `reset` removes the session by recreating the disposable database container, then checks that `pg.long_transactions` and `pg.blocking_sessions` are clear.
+A simulated `invoice-backfill` session holds a row lock while a payment waits. The payments return `503 DATABASE_BUSY` with `Retry-After: 5`, but an ordinary invoice read succeeds. The harness captures the lock wait while it exists; `reset` restores the **disposable** environment.
 
 ### What support must not do
 
-Once you have identified a possible blocker or consistency issue, **collect evidence and escalate**. Do not:
-
-- Cancel or terminate other database sessions with `pg_cancel_backend()` or `pg_terminate_backend()`.
-- Update, delete, or otherwise repair invoices, payments, customers, or keys yourself.
-- Change PostgreSQL roles, privileges, timeouts, or other settings.
-- Run unapproved corrective SQL against production systems.
-
-An engineer, DBA, or authorized owner must decide how to resolve the condition and assess the impact of any intervention.
+Do not terminate sessions with `pg_terminate_backend()` or `pg_cancel_backend()`, edit billing rows, change database grants or timeouts, or attempt an unapproved correction. Collect the evidence and ask an authorized engineer or DBA to decide what is safe.
 
 ## Read-only inspection with `psql`
 
-You do not need to install `psql` on your machine; the lab container includes it. These examples use the read-only role and do not change application data:
+The billing container includes `psql`, so a separate local installation isn't necessary. These commands only inspect state:
 
 ```powershell
 docker compose --project-name supportops exec postgres psql -U supportops_ro -d billing -c "SELECT id, number, status, total_cents FROM billing.invoices ORDER BY created_at DESC LIMIT 5;"
-
-docker compose --project-name supportops exec postgres psql -U supportops_ro -d billing -c "SELECT usename, application_name, state, now() - xact_start AS transaction_age FROM pg_stat_activity WHERE datname = 'billing';"
-
-docker compose --project-name supportops exec postgres psql -U supportops_ro -d billing -c "SELECT pid, pg_blocking_pids(pid) AS blocked_by, wait_event_type FROM pg_stat_activity WHERE cardinality(pg_blocking_pids(pid)) > 0;"
+docker compose --project-name supportops exec postgres psql -U supportops_ro -d billing -c "SELECT usename, application_name, state FROM pg_stat_activity WHERE datname = 'billing';"
 ```
 
-Use `supportops db checks --show-sql` if you want to inspect the exact query behind a catalog check. The examples above are read-only; not every statement beginning with `SELECT` is necessarily harmless if it invokes a side-effecting function. Use approved diagnostic queries rather than improvising SQL in an unfamiliar environment.
+Even a SQL statement beginning with `SELECT` can have side effects if it calls a function. Prefer the approved catalog rather than improvising SQL in an unfamiliar database.
 
 ## Troubleshoot diagnostic failures
 
-| Result or error | Likely issue | Next check |
-| --- | --- | --- |
-| PostgreSQL rejects the login (exit `3`) | Wrong user or password | Verify the source of `SUPPORTOPS_DB_URL` without exposing the password. |
-| Connection refused or timed out (exit `3`) | Database stopped, incorrect host or port, or connectivity issue | Run `docker compose ps postgres`; the lab uses `127.0.0.1:5433`. |
-| Statement timeout | Query exceeded the five-second limit | Inspect locks and long transactions; escalate persistent timeouts. |
-| Permission denied | Role lacks access to a required table or view | Verify grants with the database owner. |
-| Missing table or schema | Wrong database or incomplete environment | Confirm the connection target. |
-| Activity result marked incomplete | Monitoring visibility is restricted | Request appropriate monitoring rights or describe the limitation in the handoff. |
+| Symptom | What to check |
+| --- | --- |
+| Login rejected | Verify the source of `SUPPORTOPS_DB_URL` without exposing its password |
+| Connection refused or timed out | Check the intended host and port; inspect `docker compose --project-name supportops ps postgres` for the lab |
+| Statement timeout | Investigate locks, query duration, and long transactions |
+| Permission denied | Ask the database owner to confirm read-only grants |
+| Table or schema missing | Verify that the diagnostic URL points to the correct service database |
+| Session visibility incomplete | Report the limitation or request approved monitoring access |
 
-SupportOps masks recognized passwords and connection-string secrets in terminal and JSON output. Do not attach raw connection details or copied exception traces without reviewing them first.
+SupportOps masks recognized secrets, but exported results still require review before they are attached to tickets or shared externally.
 
 ## Escalation checklist
 
-Contact **engineering** for billing-data inconsistencies, mismatches between database and API responses, or repeated `DATABASE_BUSY` failures. Involve a **DBA or on-call engineer** for unexplained locks, unusually long transactions, statement timeouts, or database availability problems. Treat unexpected use of a superuser or write-capable diagnostic account as a **security or access-control concern**.
+Involve **engineering** for data inconsistencies or repeated `DATABASE_BUSY` errors, a **DBA/on-call engineer** for unexplained locks and availability issues, and **security or access-control owners** if a diagnostic account has unexpected write or administrative privileges.
 
-Include the time of the check, environment, check names and statuses, relevant invoice/account IDs, request IDs, and concise evidence rows or redacted JSON output. State any gaps in monitoring visibility or checks that returned `ERROR` or `SKIPPED`.
+Include the environment, timestamp, exact check names and statuses, relevant invoice/account and request IDs, evidence rows, and any `ERROR`, `SKIPPED`, or incomplete-visibility caveats. Do not include passwords or raw customer credentials.

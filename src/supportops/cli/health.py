@@ -45,7 +45,7 @@ def _print_report(report: HealthReport) -> None:
     render.emit_line()
     rows = [
         ["API liveness", _http_outcome(report.liveness), *_timing(report.liveness)],
-        ["API readiness", _readiness_outcome(report), *_timing(report.readiness)],
+        [_readiness_label(report), _readiness_outcome(report), *_timing(report.readiness)],
         ["PostgreSQL", *_database_columns(report)],
     ]
     render.emit_table("Checks", ["Check", "Result", "Time", "Request ID"], rows)
@@ -57,13 +57,22 @@ def _print_report(report: HealthReport) -> None:
 def _error_details(report: HealthReport) -> list[str]:
     details = [
         f"{name}: {result.failure.detail}"
-        for name, result in (("API liveness", report.liveness), ("API readiness", report.readiness))
+        for name, result in (
+            ("API liveness", report.liveness),
+            (_readiness_label(report), report.readiness),
+        )
         if result is not None and result.failure is not None
     ]
     database = report.database
     if database is not None and not database.reachable and database.detail:
         details.append(f"PostgreSQL: {database.detail}")
     return details
+
+
+def _readiness_label(report: HealthReport) -> str:
+    if get_target(report.target).health_style == "actuator":
+        return "API health (aggregate)"
+    return "API readiness"
 
 
 def _http_outcome(result: HttpResult) -> str:

@@ -16,6 +16,7 @@ from supportops.db.runner import (
 )
 from supportops.errors import ConfigError, ExitCode
 from supportops.settings import load_settings
+from supportops.targets import get_target
 
 MAX_TEXT_ROWS = 20
 STATUS_STYLES = {
@@ -26,6 +27,15 @@ STATUS_STYLES = {
     "error": "bold magenta",
     "skipped": "dim",
 }
+DB_URL_HINTS = {
+    "billing": "Set it in .env, for example "
+    "postgresql://supportops_ro:<password>@127.0.0.1:5433/billing",
+    "orderflow": "Set it in your orderflow.env (see orderflow.env.example), using the read-only "
+    "role described in docs/integrations/orderflow.md.",
+}
+LIMITED_VISIBILITY = (
+    "Session visibility is limited (no pg_monitor): activity results are incomplete, not clean."
+)
 BINDING_NOTE = (
     "%(name)s marks a parameter. Values given with --param are sent to PostgreSQL separately "
     "from the SQL text, so they can't change the query."
@@ -77,13 +87,19 @@ def run_command(
     json_output: JsonOutput = False,
 ) -> None:
     """Run read-only diagnostic checks. Exit code 1 means a check found a problem."""
-    plan = plan_checks(names or [], run_all=run_all, parameters=parse_param_options(param or []))
     settings = load_settings(get_state(ctx).env_file).settings
+    profile = get_target(settings.target)
+    plan = plan_checks(
+        names or [],
+        run_all=run_all,
+        parameters=parse_param_options(param or []),
+        packs=profile.check_packs,
+        target=profile.name,
+    )
     if settings.db_url is None:
         raise ConfigError(
             "SUPPORTOPS_DB_URL is not set, so there is no database to check.",
-            hint="Set it in .env, for example "
-            "postgresql://supportops_ro:<password>@127.0.0.1:5433/billing",
+            hint=DB_URL_HINTS[profile.name],
         )
     report = run_checks(
         settings.db_url,
@@ -157,6 +173,8 @@ def _print_report(report: DbReport) -> None:
         render.emit_line(
             "Skipped checks need a parameter; run them by name with --param.", style="dim"
         )
+    if not session.monitoring and any(not result.complete for result in report.results):
+        render.emit_line(LIMITED_VISIBILITY, style="yellow")
 
 
 def _print_rows(result: CheckResult) -> None:

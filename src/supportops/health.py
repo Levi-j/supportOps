@@ -55,15 +55,22 @@ def run_health_check(
     clock: Clock = time.perf_counter,
 ) -> HealthReport:
     liveness = send(client, "GET", profile.liveness_path, clock=clock)
+    actuator = profile.health_style == "actuator"
     readiness = None
     api_database = None
-    if liveness.failure is None and liveness.status == 200:
+    if liveness.failure is None and (
+        liveness.status == 200 or (actuator and liveness.status == 404)
+    ):
         readiness = send(client, "GET", profile.readiness_path, clock=clock)
-        api_database = api_database_view(readiness)
+        api_database = None if actuator else api_database_view(readiness)
     database = None
     if settings.db_url is not None:
         database = probe_database(settings.db_url, settings.connect_timeout_seconds)
-    assessment = assess(profile, liveness, readiness, api_database, database)
+    assessment = (
+        assess_actuator(profile, liveness, readiness, database)
+        if actuator
+        else assess(profile, liveness, readiness, api_database, database)
+    )
     return HealthReport(
         target=profile.name,
         api_url=str(settings.api_url),
@@ -246,6 +253,138 @@ def assess(
             "If someone else operates the database, escalate to them with this output.",
         ],
     )
+
+
+def assess_actuator(
+    profile: TargetProfile,
+    liveness: HttpResult,
+    health: HttpResult | None,
+    database: DatabaseProbe | None,
+) -> Assessment:
+    notes = _actuator_database_notes(database, service_up=_is_ready(health))
+    find_errors = "Look for errors in the service's logs: supportops logs search --level ERROR"
+    show_health = f"Look at the response: supportops api request GET {profile.readiness_path}"
+    if liveness.failure is not None:
+        return Assessment(
+            Verdict.DOWN,
+            "api_unreachable",
+            f"The service could not be reached. {liveness.failure.summary}",
+            notes,
+            [
+                liveness.failure.hint,
+                "Check that the service is running in its own environment, for example with "
+                "'docker ps' on the machine that hosts it.",
+            ],
+        )
+    if liveness.status == 404:
+        aggregate = (
+            f" {profile.readiness_path} answered {health.status} for reference."
+            if health is not None and health.status is not None
+            else ""
+        )
+        return Assessment(
+            Verdict.INCONCLUSIVE,
+            "liveness_endpoint_unavailable",
+            f"The service answered, but {profile.liveness_path} returned 404, so its liveness "
+            f"probe group appears to be disabled in this deployment.{aggregate}",
+            notes,
+            [show_health, "Ask the service owner whether the Actuator probe groups are enabled."],
+        )
+    if liveness.status != 200:
+        return Assessment(
+            Verdict.INCONCLUSIVE,
+            "unexpected_liveness_response",
+            f"Something answered at {liveness.url}, but with HTTP {liveness.status} "
+            "instead of 200.",
+            [
+                *notes,
+                "SUPPORTOPS_API_URL may point to a different service, or the service itself is "
+                "failing.",
+            ],
+            [f"Look at the response: supportops api request GET {profile.liveness_path}"],
+        )
+    if health is None or health.failure is not None:
+        failure = health.failure if health else None
+        return Assessment(
+            Verdict.DEGRADED,
+            "readiness_unanswered",
+            "The service is live, but its health endpoint didn't answer."
+            + (f" {failure.summary}" if failure else ""),
+            notes,
+            ([failure.hint] if failure else []) + [find_errors],
+        )
+    if health.status == 200:
+        return Assessment(
+            Verdict.HEALTHY, "api_ready", "The service is live and reports its health as UP.", notes
+        )
+    if health.status != 503:
+        return Assessment(
+            Verdict.INCONCLUSIVE,
+            "unexpected_readiness_response",
+            f"{profile.readiness_path} answered HTTP {health.status}, which a health endpoint "
+            "doesn't normally return.",
+            notes,
+            [show_health],
+        )
+    unnamed = (
+        "The service reports DOWN, but its health response doesn't say which component failed."
+    )
+    ask_owner = "Ask the service owner which health component reports DOWN."
+    if database is None:
+        return Assessment(
+            Verdict.DEGRADED,
+            "health_down_database_not_checked",
+            f"{unnamed} PostgreSQL wasn't checked because SUPPORTOPS_DB_URL is not set.",
+            notes,
+            [
+                "Set SUPPORTOPS_DB_URL to a read-only database role to compare with PostgreSQL "
+                "directly.",
+                find_errors,
+                ask_owner,
+            ],
+        )
+    if database.server_answered:
+        return Assessment(
+            Verdict.DEGRADED,
+            "health_down_database_reachable",
+            f"{unnamed} PostgreSQL answers from this machine, so a database outage is unlikely "
+            "from here. The cause may be the service's own database connection or settings, or "
+            "another health component.",
+            notes,
+            [find_errors, ask_owner, show_health],
+        )
+    return Assessment(
+        Verdict.DEGRADED,
+        "health_down_database_unreachable",
+        f"{unnamed} PostgreSQL doesn't answer from this machine either ({database.error}). Both "
+        "observations are consistent with a database problem, but the health response doesn't "
+        "name the failing component, and this machine's network path to PostgreSQL may differ "
+        "from the service's. This is not a confirmed database outage.",
+        notes,
+        [
+            find_errors,
+            "Check that SUPPORTOPS_DB_URL points at the service's database.",
+            "If someone else operates the database, share this output with them.",
+        ],
+    )
+
+
+def _actuator_database_notes(database: DatabaseProbe | None, *, service_up: bool) -> list[str]:
+    if database is None:
+        return ["Database check skipped: SUPPORTOPS_DB_URL is not set."]
+    if database.reachable:
+        return []
+    if database.server_answered:
+        return [
+            f"PostgreSQL answered, but SupportOps' own connection was refused ({database.error}). "
+            "Check SUPPORTOPS_DB_URL; this says nothing about the service's own connection."
+        ]
+    if service_up:
+        return [
+            f"SupportOps couldn't reach PostgreSQL from this machine ({database.error}), although "
+            "the service reports UP. Check SUPPORTOPS_DB_URL."
+        ]
+    return []
 
 
 def _is_ready(readiness: HttpResult | None) -> bool:

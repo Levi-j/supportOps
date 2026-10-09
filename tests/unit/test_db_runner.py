@@ -183,7 +183,15 @@ def test_all_skips_checks_without_their_parameters() -> None:
 
     skipped = {item.check.name: item.skip_reason for item in plan if item.skip_reason}
     assert set(skipped) == {"billing.api_key_status", "billing.invoice_lookup"}
-    assert len(plan) == len(CHECKS)
+    assert len(plan) == len([check for check in CHECKS.values() if check.pack != "orderflow"])
+
+
+def test_all_for_orderflow_skips_the_order_lookup_without_an_id() -> None:
+    plan = plan_checks([], run_all=True, parameters={}, target="orderflow")
+
+    skipped = {item.check.name: item.skip_reason for item in plan if item.skip_reason}
+    assert skipped == {"orderflow.order_lookup": "Needs --param id (for example id=42)."}
+    assert {item.check.pack for item in plan} == {"generic", "orderflow"}
 
 
 def test_all_uses_parameters_that_are_given() -> None:

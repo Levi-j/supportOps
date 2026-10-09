@@ -5,23 +5,14 @@
 ## Incident details
 
 | Field | Value |
-
 | --- | --- |
-
 | Incident ID | INC-003 |
-
 | Reproduced (UTC) | 2026-10-09 |
-
 | Severity | High — duplicate payment records and an unpaid invoice ([severity guide](../runbooks/triage-and-escalation.md#severity-guide)) |
-
 | Status | Diagnosed; engineering escalation recommended (simulation) |
-
 | Service | billing-api |
-
 | Request IDs | `inc003-cust-01`, `inc003-cust-02` |
-
 | Affected accounts | `acct_juniper` (Juniper Dental Group), invoice `inv_juniper_1003` (INV-1003) |
-
 | Findings | `payment_invoice_inconsistent` and `unhandled_exception` — both confirmed |
 
 ## Customer report
@@ -31,11 +22,8 @@
 ## Expected vs. observed behavior
 
 | | Behavior |
-
 | --- | --- |
-
 | Expected | A successful `POST /v1/invoices/inv_juniper_1003/pay` records one payment, marks the invoice paid, and returns `200`. If processing fails, normal atomic behavior prevents a partial payment update. |
-
 | Observed | Both `inc003-cust-01` and `inc003-cust-02` returned `500 INTERNAL_ERROR` around `2026-10-09T06:00:10Z`. The invoice remained `open` with two successful payment records. |
 
 ## Reproduction
@@ -157,21 +145,13 @@ The command exits with `1` because two checks found inconsistencies. No records 
 ## Evidence
 
 | ID | Source and time (UTC) | Observation |
-
 | --- | --- | --- |
-
 | E1 | Database check `billing.invoice_lookup`, 06:00:11.600Z | `inv_juniper_1003` is `open`, total 14900 EUR cents, 2 successful and 1 failed payments. |
-
 | E2 | Database check `billing.payment_on_unpaid_invoice`, 06:00:11.600Z | Lists `inv_juniper_1003` as unpaid with a successful payment. |
-
 | E3 | Database check `billing.duplicate_payments`, 06:00:11.600Z | Lists `inv_juniper_1003` with payments `pay_f8af2cbd8c1a907f` and `pay_ad701eaa81e51ae5`. |
-
 | E4 | Log entry `:14`, 06:00:10.797Z | `payment.recorded` for `pay_ad701eaa81e51ae5` (request `inc003-cust-02`). |
-
 | E5 | Log entry `:15`, 06:00:10.797Z | `unhandled_exception` `InjectedFault` with stack trace. |
-
 | E6 | Log entry `:16`, 06:00:10.799Z | Access log: `POST /v1/invoices/inv_juniper_1003/pay -> 500`. |
-
 | E7 | Log entry `:3`, 06:00:08.255Z | `app.started` in environment `lab` with `faults=payment_partial_commit`. |
 
 The single failed payment shown by `billing.invoice_lookup` is seeded lab data that predates this scenario. It is distinct from the two successful payment records created during the reproduction.
@@ -220,13 +200,8 @@ For this disposable simulation, `supportops-lab reset` restores the clean seed; 
 ## Prevention and follow-up
 
 | Action | Owner | Status |
-
 | --- | --- | --- |
-
 | Record the payment and mark the invoice paid in one database transaction | Engineering | Proposed |
-
 | Support idempotency keys on payment requests so a retry can't create a second payment | Engineering | Proposed |
-
 | Alert on `billing.payment_on_unpaid_invoice` and `billing.duplicate_payments` findings | Engineering / Support | Proposed |
-
 | Keep the "don't retry until reviewed" guidance in the payment-failure runbook | Support | Ongoing |

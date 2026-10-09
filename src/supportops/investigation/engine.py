@@ -14,10 +14,14 @@ from supportops.investigation.models import (
     LiveEvidence,
     LogEvidence,
 )
+from supportops.investigation.orderflow import ORDERFLOW_FALLBACK_RULES, ORDERFLOW_RULES
 from supportops.investigation.rules import (
+    FALLBACK_RULES,
     HEALTH_KEY,
+    RULES,
     START_KEY,
     Facts,
+    Rule,
     apply_rules,
     check_key,
     log_key,
@@ -26,7 +30,12 @@ from supportops.investigation.text import describe_check, describe_event, descri
 from supportops.logs.analysis import TimeWindow, is_warning_or_error
 from supportops.logs.parser import LogEvent, LogInput
 from supportops.settings import Settings
-from supportops.targets import TargetProfile
+from supportops.targets import TargetProfile, get_target
+
+RULE_SETS: dict[str, tuple[tuple[Rule, ...], tuple[Rule, ...]]] = {
+    "billing": (RULES, FALLBACK_RULES),
+    "orderflow": (ORDERFLOW_RULES, ORDERFLOW_FALLBACK_RULES),
+}
 
 
 def validate_request_id(request_id: str) -> str:
@@ -53,7 +62,9 @@ def investigate(
     validate_request_id(request_id)
     logs = collect_logs(log_input, request_id, window)
     live = collect_live(logs, settings, profile, client, use_database=use_database, now=now)
-    drafts = apply_rules(Facts(logs, live, settings.slow_request_ms))
+    drafts = apply_rules(
+        Facts(logs, live, settings.slow_request_ms), *RULE_SETS[profile.check_pack]
+    )
     findings, evidence = number_evidence(drafts, evidence_candidates(logs, live))
     return Investigation(
         request_id=request_id,
@@ -80,17 +91,21 @@ def evidence_candidates(logs: LogEvidence, live: LiveEvidence) -> dict[str, Evid
         candidates[check_key(result.name)] = Evidence(
             id="",
             source="database",
-            summary=describe_check(result, logs.entities.invoice_id),
+            summary=describe_check(
+                result, logs.entities.invoice_id, order_id=logs.entities.order_id
+            ),
             reference=result.name,
             observed_at=live.collected_at,
             current_state=True,
         )
     if live.health is not None:
+        target = get_target(live.health.target)
         candidates[HEALTH_KEY] = Evidence(
             id="",
             source="api",
             summary=describe_health(live.health),
-            reference="GET /health, GET /health/ready and a PostgreSQL probe",
+            reference=f"GET {target.liveness_path}, GET {target.readiness_path} and a "
+            "PostgreSQL probe",
             observed_at=live.collected_at,
             current_state=True,
         )

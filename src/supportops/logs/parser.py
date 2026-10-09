@@ -274,7 +274,7 @@ _FIELDS = (
     _Field("method", ("method", "http.request.method"), _text),
     _Field("path", ("path", "url.path"), _text),
     _Field("status", ("status", "http.response.status_code"), _status),
-    _Field("duration_ms", ("duration_ms",), _duration),
+    _Field("duration_ms", ("duration_ms", "durationMs"), _duration),
     _Field("account_id", ("account_id", "accountId"), _text),
     _Field("error_type", ("error_type", "error.type"), _text),
     _Field("error_message", ("error_message", "error.message"), _text),

@@ -5,23 +5,14 @@
 ## Incident details
 
 | Field | Value |
-
 | --- | --- |
-
 | Incident ID | INC-002 |
-
 | Reproduced (UTC) | 2026-10-09 |
-
 | Severity | Low — request formatting requires a client-side fix ([severity guide](../runbooks/triage-and-escalation.md#severity-guide)) |
-
 | Status | Diagnosed; customer workaround verified (simulation) |
-
 | Service | billing-api |
-
 | Request IDs | `inc002-cust-01` (failing), `inc002-cust-02` (fixed), `inc002-ps51-01` and `inc002-ps51-02` (manual Windows run) |
-
 | Affected accounts | Not identified from the failing request (invalid JSON is rejected before authentication) |
-
 | Finding | `malformed_json` — confirmed |
 
 ## Customer report
@@ -33,11 +24,8 @@ The reported script constructs JSON inline and passes it to `curl.exe` with `-d`
 ## Expected vs. observed behavior
 
 | | Behavior |
-
 | --- | --- |
-
 | Expected | `POST /v1/customers` with `{"name":"Acme","email":"billing@acme.example"}` returns `201 Created`. |
-
 | Observed | `inc002-cust-01` returned `400 MALFORMED_REQUEST` at `2026-10-09T05:59:36.446Z`; the equivalent correctly encoded request returned `201`. |
 
 ## Reproduction
@@ -127,13 +115,9 @@ No database check was needed. JSON parsing failed before authentication, so the 
 ## Evidence
 
 | ID | Source and time (UTC) | Observation |
-
 | --- | --- | --- |
-
 | E1 | Log entry, `docker:supportops-scenario-billing-api-1:10`, 2026-10-09T05:59:36.445Z | `request.invalid_json`: `Expecting property name enclosed in double quotes`, position 1, `content_length=38`. |
-
 | E2 | Log entry, `docker:supportops-scenario-billing-api-1:11`, 2026-10-09T05:59:36.446Z | Access log: `POST /v1/customers -> 400`. |
-
 | Manual test | Windows PowerShell 5.1, `2026-10-09T05:59:37.556Z` | Inline `-d` request `inc002-ps51-01` returned `400` with the same decoder error; file-based `inc002-ps51-02` returned `201`. |
 
 ## Root cause and confidence
@@ -178,11 +162,7 @@ Using PowerShell's `Invoke-RestMethod` with `ConvertTo-Json` is another reasonab
 ## Prevention and follow-up
 
 | Action | Owner | Status |
-
 | --- | --- | --- |
-
 | Add a Windows PowerShell example that sends JSON from a file to the API documentation | Documentation | Proposed |
-
 | Mention PowerShell quoting in the `MALFORMED_REQUEST` troubleshooting guide | Support | Proposed |
-
 | Use `supportops api request --data-file` when reproducing customer requests on Windows | Support | Ongoing |

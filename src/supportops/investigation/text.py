@@ -16,7 +16,7 @@ from supportops.redaction import redact_value
 
 MAX_DETAIL_CHARACTERS = 200
 MAX_SESSIONS = 5
-_HIDDEN_FIELDS = frozenset({"user_agent", "service", "version", "color_message"})
+_HIDDEN_FIELDS = frozenset({"user_agent", "service", "version", "color_message", "process", "ecs"})
 _SCOPE_TEXT = {
     "isolated": "no other request in the window shows this error.",
     "recurring": "other requests show this error, from at most one known account.",
@@ -69,9 +69,28 @@ def event_details(event: LogEvent) -> str:
     )
 
 
-def describe_check(result: CheckResult, invoice_id: str | None) -> str:
+def describe_check(
+    result: CheckResult, invoice_id: str | None, *, order_id: str | None = None
+) -> str:
     if result.status == "error":
         return f"{result.name} couldn't run: {result.summary}"
+    if result.name == "orderflow.order_lookup" and result.rows:
+        row = result.rows[0]
+        return (
+            f"Order {row.get('order_id')} (customer {row.get('customer_id')}): status "
+            f"{row.get('status')}, total {row.get('total_amount')}, items total "
+            f"{row.get('items_total')} across {row.get('item_count')} items, units ordered "
+            f"{row.get('units_ordered')}, reserved {row.get('units_reserved')}, restored "
+            f"{row.get('units_restored')}."
+        )
+    if result.pack == "orderflow" and result.rows and "order_id" in result.columns:
+        includes = any(str(row.get("order_id")) == order_id for row in result.rows)
+        text = result.summary
+        if order_id is not None:
+            text += f" It {'lists' if includes else 'does not list'} order {order_id}."
+        if result.truncated:
+            text += " Only the first rows were returned."
+        return text
     if result.name == "billing.api_key_status" and result.rows:
         row = result.rows[0]
         return (

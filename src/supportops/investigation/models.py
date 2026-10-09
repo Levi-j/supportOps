@@ -57,6 +57,8 @@ class Entities(BaseModel):
     invoice_id: str | None = None
     customer_id: str | None = None
     payment_ids: list[str] = Field(default_factory=list)
+    order_id: str | None = None
+    product_id: str | None = None
 
 
 class CoverageGap(BaseModel):
@@ -114,6 +116,17 @@ class InvoiceState(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class OrderState(BaseModel):
+    order_id: str
+    lookup: Literal["found", "not_found", "unavailable"]
+    record: dict[str, Any] | None = None
+    conditions: list[str] = Field(default_factory=list)
+    corroborated_by: list[str] = Field(default_factory=list)
+    uncorroborated: list[str] = Field(default_factory=list)
+    contradictions: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
 class LiveEvidence(BaseModel):
     collected_at: datetime
     database: DatabaseStatus
@@ -121,6 +134,7 @@ class LiveEvidence(BaseModel):
     database_detail: str | None = None
     checks: list[CheckResult] = Field(default_factory=list)
     invoice: InvoiceState | None = None
+    order: OrderState | None = None
     health: HealthReport | None = None
     notes: list[str] = Field(default_factory=list)
     open_questions: list[str] = Field(default_factory=list)

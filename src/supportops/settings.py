@@ -25,7 +25,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    target: Literal["billing"] = "billing"
+    target: Literal["billing", "orderflow"] = "billing"
     api_url: AnyHttpUrl = AnyHttpUrl("http://127.0.0.1:8001")
     api_key: SecretStr | None = None
     db_url: SecretStr | None = None

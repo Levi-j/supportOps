@@ -10,7 +10,7 @@ from typing import Any, Literal
 import psycopg
 from pydantic import BaseModel, Field, SecretStr
 
-from supportops.db.catalog import CATALOG, Check, ParameterValue, get_check
+from supportops.db.catalog import CATALOG, Check, ParameterValue, check_for_target, get_check
 from supportops.db.connection import (
     STATEMENT_TIMEOUT_MS,
     Connection,
@@ -22,6 +22,7 @@ from supportops.db.connection import (
     session_info,
 )
 from supportops.errors import ConfigError, ExitCode
+from supportops.targets import get_target
 
 MAX_ROWS = 200
 STATUS_ORDER: tuple["CheckStatus", ...] = ("pass", "fail", "warn", "info", "error", "skipped")
@@ -94,7 +95,12 @@ def parse_param_options(items: Sequence[str]) -> dict[str, str]:
 
 
 def plan_checks(
-    names: Sequence[str], *, run_all: bool, parameters: dict[str, str]
+    names: Sequence[str],
+    *,
+    run_all: bool,
+    parameters: dict[str, str],
+    packs: frozenset[str] | None = None,
+    target: str = "billing",
 ) -> list[PlannedCheck]:
     if names and run_all:
         raise ConfigError("Name the checks to run or use --all, not both.")
@@ -103,7 +109,11 @@ def plan_checks(
             "Name at least one check, or use --all.",
             hint="List the available checks with 'supportops db checks'.",
         )
-    selected = list(CATALOG) if run_all else [get_check(name) for name in dict.fromkeys(names)]
+    allowed = packs if packs is not None else get_target(target).check_packs
+    if run_all:
+        selected = [check for check in CATALOG if check.pack in allowed]
+    else:
+        selected = [check_for_target(name, allowed, target) for name in dict.fromkeys(names)]
     declared = {parameter.name for check in selected for parameter in check.parameters}
     unknown = sorted(set(parameters) - declared)
     if unknown:

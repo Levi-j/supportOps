@@ -16,7 +16,12 @@ def test_check_names_are_unique_and_namespaced() -> None:
     names = [check.name for check in CATALOG]
 
     assert len(names) == len(set(names))
-    assert all(re.fullmatch(r"(db|pg|billing)\.[a-z_]+", name) for name in names)
+    assert all(re.fullmatch(r"(db|pg|billing|orderflow)\.[a-z_]+", name) for name in names)
+    assert all(
+        check.name.split(".")[0] == check.pack
+        for check in CATALOG
+        if check.pack in ("billing", "orderflow")
+    )
     assert set(CHECKS) == set(names)
 
 
@@ -32,6 +37,10 @@ def test_every_required_check_is_in_the_catalog() -> None:
         "billing.duplicate_payments",
         "billing.api_key_status",
         "billing.invoice_lookup",
+        "orderflow.inventory_mismatch",
+        "orderflow.order_total_mismatch",
+        "orderflow.orders_without_items",
+        "orderflow.order_lookup",
     }
 
 
@@ -41,7 +50,7 @@ def test_metadata_is_complete(check: object) -> None:
 
     assert isinstance(check, Check)
     assert check.description
-    assert check.pack in ("generic", "billing")
+    assert check.pack in ("generic", "billing", "orderflow")
     if check.kind in ("consistency", "activity", "lookup"):
         assert check.ok_message
         assert check.problem_message
@@ -73,6 +82,31 @@ def test_no_check_reads_secrets_or_customer_contact_details() -> None:
     for check in CATALOG:
         assert "key_hash" not in check.sql
         assert "email" not in check.sql
+        assert "password_hash" not in check.sql
+        assert "request_hash" not in check.sql
+        assert ".note" not in check.sql
+        assert "public.users" not in check.sql
+
+
+def test_orderflow_checks_never_return_the_idempotency_key_itself() -> None:
+    for check in CATALOG:
+        if check.pack != "orderflow":
+            continue
+        mentions = re.findall(r"[\w.]*idempotency_key[^,\n]*", check.sql)
+        assert all(mention.endswith("IS NOT NULL AS has_idempotency_key") for mention in mentions)
+        assert "public." in check.sql
+
+
+def test_the_order_lookup_takes_a_positive_integer_id() -> None:
+    order_id = CHECKS["orderflow.order_lookup"].parameter("id")
+
+    assert order_id is not None
+    assert order_id.required
+    assert order_id.parse("42") == 42
+    for raw in ("0", "-1", "42; DROP TABLE orders", "abc"):
+        with pytest.raises(ConfigError):
+            order_id.parse(raw)
+    assert CHECKS["orderflow.order_lookup"].usage() == ("Needs --param id (for example id=42).")
 
 
 def test_unknown_check_names_are_rejected() -> None:

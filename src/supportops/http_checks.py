@@ -17,7 +17,7 @@ from supportops import __version__
 from supportops.errors import ConfigError
 from supportops.redaction import mask_api_key
 from supportops.settings import Settings
-from supportops.targets import TargetProfile
+from supportops.targets import TargetProfile, get_target
 
 REQUEST_ID_HEADER = "X-Request-Id"
 REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
@@ -89,11 +89,12 @@ class HttpResult(BaseModel):
 class Credentials:
     api_key: str | None = field(repr=False)
     source: str
+    label: str = "API key"
 
     def describe(self) -> str:
         if self.api_key is None:
             return self.source
-        return f"API key {mask_api_key(self.api_key)} from {self.source}"
+        return f"{self.label} {mask_api_key(self.api_key)} from {self.source}"
 
 
 def create_client(settings: Settings, transport: httpx.BaseTransport | None = None) -> httpx.Client:
@@ -117,18 +118,25 @@ def resolve_credentials(settings: Settings, *, no_auth: bool, key_env: str | Non
         raise ConfigError("Use either --no-auth or --key-env, not both.")
     if no_auth:
         return Credentials(api_key=None, source="no credentials (--no-auth)")
+    profile = get_target(settings.target)
+    label = profile.credential_name
     if key_env:
         value = os.environ.get(key_env)
         if not value:
+            example = "<token>" if profile.jwt is not None else "bk_..."
             raise ConfigError(
                 f"Environment variable {key_env} is not set or is empty.",
-                hint=f'Set it first, for example: $env:{key_env} = "bk_..." (PowerShell).',
+                hint=f'Set it first, for example: $env:{key_env} = "{example}" (PowerShell).',
             )
-        return _checked(Credentials(api_key=value, source=f"environment variable {key_env}"))
+        return _checked(
+            Credentials(api_key=value, source=f"environment variable {key_env}", label=label)
+        )
     if settings.api_key is None:
         return Credentials(api_key=None, source="no credentials (SUPPORTOPS_API_KEY is not set)")
     return _checked(
-        Credentials(api_key=settings.api_key.get_secret_value(), source="SUPPORTOPS_API_KEY")
+        Credentials(
+            api_key=settings.api_key.get_secret_value(), source="SUPPORTOPS_API_KEY", label=label
+        )
     )
 
 
@@ -247,6 +255,19 @@ def response_hint(
             "The server couldn't read the request. If you sent a body, check that it is valid "
             "JSON and that Content-Type is application/json."
         )
+    if status == 401 and profile.jwt is not None:
+        challenge = result.headers.get("www-authenticate", "")
+        sent = (
+            "The token was sent but refused (invalid_token): it may be expired, signed with a "
+            "different secret, or issued for another environment."
+            if "invalid_token" in challenge
+            else "The API says no usable token reached it."
+        )
+        return (
+            f"The API rejected the credentials ({credentials.describe()}). {sent} This service "
+            "doesn't log why a token was rejected. Inspect the token's claims locally (unverified) "
+            "with: supportops auth check --key-env VARIABLE"
+        )
     if status == 401:
         return (
             f"The API rejected the credentials ({credentials.describe()}). Check that the key "
@@ -258,10 +279,11 @@ def response_hint(
             return "The key was accepted, but the account is suspended. This needs account support."
         return "The credentials are valid, but they don't allow this operation."
     if status == 404:
+        owner = "user the token" if profile.jwt is not None else "account the key"
         return (
             "Nothing exists at this path for this account. Check the path and any IDs; "
-            "resources that belong to another account also return 404. To see which account "
-            f"the key belongs to, run: supportops api request GET {profile.account_path}"
+            "resources that belong to another account also return 404. To see which "
+            f"{owner} belongs to, run: supportops api request GET {profile.account_path}"
         )
     if status == 405:
         return (
