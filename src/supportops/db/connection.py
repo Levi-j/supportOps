@@ -1,5 +1,6 @@
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from urllib.parse import unquote, urlsplit
 
 import psycopg
@@ -7,6 +8,7 @@ from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import TupleRow
 from pydantic import BaseModel, SecretStr
 
+from supportops.errors import SupportOpsError
 from supportops.redaction import redact_dsn
 
 APPLICATION_NAME = "supportops"
@@ -49,15 +51,123 @@ def dsn_host(dsn: str) -> str | None:
     return str(host) if host else None
 
 
-def connect_read_only(dsn: str, connect_timeout_seconds: float) -> Connection:
+def connect_read_only(
+    dsn: str, connect_timeout_seconds: float, statement_timeout_ms: int = STATEMENT_TIMEOUT_MS
+) -> Connection:
     connection = psycopg.connect(
         dsn,
         connect_timeout=max(1, round(connect_timeout_seconds)),
         application_name=APPLICATION_NAME,
-        options=f"-c default_transaction_read_only=on -c statement_timeout={STATEMENT_TIMEOUT_MS}",
+        options=f"-c default_transaction_read_only=on -c statement_timeout={statement_timeout_ms}",
     )
     connection.read_only = True
     return connection
+
+
+class DatabaseError(SupportOpsError):
+    pass
+
+
+class SessionInfo(BaseModel):
+    role: str
+    database: str
+    server_version: str
+    read_only: bool
+    monitoring: bool
+
+
+@contextmanager
+def read_only_session(
+    dsn: SecretStr,
+    connect_timeout_seconds: float,
+    statement_timeout_ms: int = STATEMENT_TIMEOUT_MS,
+) -> Iterator[Connection]:
+    raw = dsn.get_secret_value()
+    try:
+        connection = connect_read_only(raw, connect_timeout_seconds, statement_timeout_ms)
+    except psycopg.Error as exc:
+        raise connection_error(exc, raw) from None
+    try:
+        connection.autocommit = True
+        yield connection
+    finally:
+        connection.close()
+
+
+def session_info(connection: Connection) -> SessionInfo:
+    with connection.transaction():
+        row = connection.execute(
+            "SELECT current_user, current_database(), current_setting('server_version'),"
+            " current_setting('transaction_read_only'),"
+            " role.rolsuper OR pg_has_role(current_user, 'pg_monitor', 'USAGE')"
+            " FROM pg_roles AS role WHERE role.rolname = current_user"
+        ).fetchone()
+    if row is None:
+        raise DatabaseError("PostgreSQL didn't describe the current session.")
+    role, database, version, read_only, monitoring = row
+    return SessionInfo(
+        role=role,
+        database=database,
+        server_version=version,
+        read_only=read_only == "on",
+        monitoring=bool(monitoring),
+    )
+
+
+def connection_error(exc: psycopg.Error, dsn: str) -> DatabaseError:
+    target = describe_dsn(dsn)
+    category = classify_error(exc)
+    if category == "authentication_failed":
+        return DatabaseError(
+            f"PostgreSQL rejected the login for {target}.",
+            hint="Check the user name and password in SUPPORTOPS_DB_URL. "
+            "The lab's support role is supportops_ro.",
+        )
+    if category == "database_missing":
+        return DatabaseError(
+            f"The database in SUPPORTOPS_DB_URL doesn't exist ({target}).",
+            hint="Check the database name at the end of SUPPORTOPS_DB_URL (the lab uses billing).",
+        )
+    if category in ("connection_refused", "timeout"):
+        return DatabaseError(
+            f"PostgreSQL at {target} didn't accept the connection ({category}).",
+            hint="Check that PostgreSQL is running ('docker compose ps postgres') and that the "
+            "host and port in SUPPORTOPS_DB_URL are right (the lab uses 127.0.0.1:5433).",
+        )
+    if category == "dns_failure":
+        return DatabaseError(
+            f"The database host name in SUPPORTOPS_DB_URL couldn't be resolved ({target}).",
+            hint="Check the host name for typos.",
+        )
+    return DatabaseError(
+        f"Couldn't connect to PostgreSQL at {target}: {_without_password(_first_line(exc), dsn)}"
+    )
+
+
+def classify_query_error(exc: psycopg.Error) -> tuple[str, str]:
+    if isinstance(exc, psycopg.errors.QueryCanceled):
+        return (
+            "statement_timeout",
+            "The query was cancelled by the statement timeout. Another session may be holding "
+            "locks on these tables; run pg.blocking_sessions to check.",
+        )
+    if isinstance(exc, psycopg.errors.InsufficientPrivilege):
+        return (
+            "permission_denied",
+            "The database role isn't allowed to read what this check needs.",
+        )
+    if isinstance(
+        exc,
+        psycopg.errors.UndefinedTable
+        | psycopg.errors.UndefinedColumn
+        | psycopg.errors.InvalidSchemaName,
+    ):
+        return (
+            "missing_object",
+            "This database doesn't have the tables this check expects. "
+            "Check that SUPPORTOPS_DB_URL points to the billing database.",
+        )
+    return "error", _first_line(exc)
 
 
 def probe_database(

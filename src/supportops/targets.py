@@ -9,6 +9,9 @@ class TargetProfile:
     account_path: str
     auth_scheme: str
     lab_writes_allowed: bool
+    api_key_prefix: str
+    api_key_pattern: str
+    api_key_prefix_length: int
 
 
 BILLING = TargetProfile(
@@ -18,6 +21,9 @@ BILLING = TargetProfile(
     account_path="/v1/account",
     auth_scheme="Bearer",
     lab_writes_allowed=True,
+    api_key_prefix="bk_",
+    api_key_pattern=r"bk_[A-Za-z0-9_]{17,125}",
+    api_key_prefix_length=12,
 )
 
 TARGETS = {profile.name: profile for profile in (BILLING,)}

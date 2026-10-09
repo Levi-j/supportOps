@@ -1,70 +1,69 @@
 # Logs and request IDs
 
-Use this runbook to investigate a failed API request, look for recurring errors, or collect evidence for an escalation. Start with a request ID if you have one. Otherwise, use a log summary to understand recent activity, then search for the events that matter.
+Use this runbook to follow a failed request, find recurring application errors, or gather evidence for an engineering escalation. If you have a request ID, start with a trace. Otherwise, summarize recent activity and narrow the results with a search.
 
-The examples use the local SupportOps billing API. The 400, 422, and 500 examples read synthetic events from `tests/fixtures/logs/billing-api.jsonl`; they do not change the lab or trigger faults.
+The examples use the local SupportOps billing API. Examples for `400`, `422`, and `500` responses read **synthetic fixture logs** from `tests/fixtures/logs/billing-api.jsonl`; they do not activate faults or modify the lab database.
 
-## What the logs contain
+## Understand the log fields
 
-The billing API writes structured logs: one JSON object per line, with named fields rather than an unstructured message. For example:
+The billing API writes structured logs as JSON Lines: one JSON object per line. An authentication failure, for example, may look like this:
 
 ```json
 {"timestamp":"2026-10-08T21:39:12.256Z","level":"WARNING","service":"billing-api","logger":"billing_api.auth","message":"API key rejected","request_id":"ticket-5120","event_name":"auth.rejected","reason":"missing_header"}
 ```
 
-The fields most useful during an investigation are:
+The most useful fields are:
 
 | Field | What it tells you |
 | --- | --- |
-| `timestamp` | When the event was logged. `Z` indicates UTC. |
-| `level` | The severity of the log entry, such as `INFO`, `WARNING`, or `ERROR`. |
-| `event_name` | The type of event, such as `auth.rejected` or `http.request`. |
-| `request_id` | The correlation ID linking entries from the same request. |
-| `method`, `path`, `status`, `duration_ms` | What the HTTP request did, how it ended, and how long the server took. |
-| `account_id` | The account associated with an authenticated request, when available. |
-| `reason`, `error`, `fields` | Event-specific context, such as an authentication rejection or validation failure. |
-| `error_type`, `error_message`, `stack_trace` | Exception information, when an unexpected error is logged. |
+| `timestamp` | When the event was recorded; `Z` denotes UTC. |
+| `level` | Severity, such as `INFO`, `WARNING`, or `ERROR`. |
+| `event_name` | What happened, such as `auth.rejected` or `http.request`. |
+| `request_id` | Correlation ID connecting events from one request. |
+| `method`, `path`, `status`, `duration_ms` | HTTP method, path, response status, and server-side processing time. |
+| `account_id` | Account associated with the request, when known. |
+| `reason`, `error`, `fields` | Event-specific details, including rejection reasons and validation fields. |
+| `error_type`, `error_message`, `stack_trace` | Exception details when an unexpected failure is recorded. |
 
-The billing API is designed not to log full API keys, Authorization headers, request bodies, or customer email addresses. Still, treat logs from other services as potentially sensitive and review excerpts before sharing them.
+The billing API is designed not to log full API keys, Authorization headers, request bodies, query strings, or customer email addresses. Logs from other services may be less restrictive, so review any excerpt before sharing it.
 
-### Why the request ID matters
+### Follow the request ID
 
-The billing API returns `X-Request-Id` in its responses and includes `request_id` in error bodies. Log entries produced while handling the request carry the same ID. That lets you isolate one request from routine health checks and other customer traffic.
+The billing API returns `X-Request-Id` in response headers and includes `request_id` in structured error bodies. Server log events generated while handling the request use the same value.
 
-SupportOps generates a request ID if you do not provide one. For a reproducible test, use an ID associated with your ticket:
+Make a safe, deliberately unauthenticated request to create a traceable example:
 
 ```powershell
 uv run supportops api request GET /v1/account --no-auth --request-id ticket-5120
 ```
 
-This request intentionally omits credentials, so the expected response is `401 Unauthorized`. The request ID is `ticket-5120`; the API request command exits with code `1` because it received an error response.
+The API should return `401 Unauthorized`, and the command exits with code `1` because the response is an error. This is expected for the example; no records are changed.
 
-A supplied ID can contain letters, digits, underscores, and hyphens, up to 64 characters. The billing API replaces invalid IDs with a generated value. Use the ID returned by the API when correlating logs.
+Request IDs may contain letters, digits, underscores, and hyphens, up to 64 characters. If the supplied ID is invalid, the API replaces it. Always use the ID **returned by the API** when searching its logs.
 
-## Choose the right log command
+## Choose a command
 
-| Command | Use it when |
+| Command | Use it to |
 | --- | --- |
-| `logs summary` | You need an overview of recent statuses, events, warnings, or repeated errors. |
-| `logs search` | You know what to filter for: a status class, request ID, event name, path, or time range. |
-| `logs trace REQUEST_ID` | You want the ordered events for one specific request. |
+| `logs summary` | Review response statuses, event counts, slow requests, and recurring errors. |
+| `logs search` | Find entries matching a request ID, event, severity, status, path, text, or time window. |
+| `logs trace REQUEST_ID` | Read the events associated with one request in timestamp order. |
 
-All three commands read logs without changing the source. If you do not specify a source, they use `SUPPORTOPS_LOG_SOURCE`, which defaults to `docker:supportops-billing-api-1` in the lab.
+All three commands read from Docker, a local file, or standard input. Without an explicit source, they use `SUPPORTOPS_LOG_SOURCE`, which defaults to `docker:supportops-billing-api-1` in the lab.
 
-## Trace a request from start to finish
+## Trace a request
 
-After sending the request above, run:
+After running the unauthenticated request above:
 
 ```powershell
 uv run supportops logs trace ticket-5120
 ```
 
-A typical result is:
+A shortened trace looks like this:
 
 ```text
 2 log entries for request ID ticket-5120 in docker:supportops-billing-api-1
 Access log: GET /v1/account -> 401 in 8 ms
-First entry at 2026-10-08T21:39:12.256Z, spanning 0 ms
 Highlights: authentication
 
 +0 ms  WARNING  auth.rejected  API key rejected  [authentication]
@@ -73,61 +72,52 @@ Highlights: authentication
        user_agent=supportops/0.1.0
 ```
 
-The access log records the method, path, final status, and server-side duration. The `+N ms` offsets show when each entry was written relative to the first entry; they are not measurements of how long an individual operation took. Two events can both appear at `+0 ms` when their timestamps are within the same millisecond.
+The access log gives the final HTTP status and server-side duration. The `+N ms` values indicate how much later each event was **logged**, relative to the first entry; they are not timings for the operations represented by those events. Two entries may have the same offset if they were recorded within the same millisecond.
 
-Markers such as `[authentication]`, `[validation]`, `[database]`, and `[exception]` highlight events worth inspecting. They describe the recorded evidence; they do not establish a root cause on their own. Additional fields appear under their events, with recognized secrets masked.
+Tags such as `[authentication]`, `[validation]`, `[database]`, and `[exception]` help surface relevant evidence. They do not establish a root cause by themselves. Recorded stack traces are shown when available, with recognized secrets masked.
 
-If no matching entries exist, `logs trace` exits with code `1`. Before concluding the request was never processed, check that:
+If no entries match, `logs trace` exits with code `1`. Before concluding that the request was not handled, check whether it reached the API at all, whether the ID and source are correct, and whether the selected time window covers the event. A recreated Docker container may no longer expose the previous container's logs.
 
-- The request reached the API. Connection and DNS failures can happen before the server receives anything.
-- You have the correct container or file, and the exact request ID.
-- The selected time window includes the request.
-- The container has not been recreated since the event; its previous logs may no longer be available through `docker logs`.
+## Investigate common HTTP failures
 
-A missing access-log entry also limits what you can conclude about the final HTTP response. Use the client response and other evidence rather than guessing.
+### 401 — Authentication rejected
 
-## Investigate common HTTP errors
+The billing API returns the same public `401 UNAUTHENTICATED` response for missing, malformed, unknown, revoked, and expired keys. Its `auth.rejected` event records the internal reason.
 
-### 401: Authentication rejected
-
-The billing API returns the same public `401 UNAUTHENTICATED` response for missing, malformed, unknown, revoked, or expired keys. The server's `auth.rejected` log entry records the specific reason without exposing the full key.
-
-| Logged `reason` | Meaning | What to check |
+| Logged reason | Meaning | Next check |
 | --- | --- | --- |
-| `missing_header` | No Authorization header arrived. | Whether the client sends credentials. |
-| `malformed_header` | The header does not have the expected Bearer format. | Header construction and the `Bearer ` prefix. |
-| `unknown_key` | The supplied key is not recognized. | Typos, environment mix-ups, or outdated configuration. |
-| `revoked_key` | The key was revoked. | Recent key rotation and which key the client deployed. |
-| `expired_key` | The key is past its expiry. | Whether a current key has been issued and deployed. |
+| `missing_header` | No Authorization header arrived. | Confirm the client supplies credentials. |
+| `malformed_header` | Header or key format is invalid. | Check how the client constructs `Bearer <key>`. |
+| `unknown_key` | The submitted credential was not recognized. | Check typos, rotation, and target environment. |
+| `revoked_key` | The matching key has been revoked. | Verify rotation history and the deployed credential. |
+| `expired_key` | The matching key has expired. | Check whether a current key was issued. |
 
-The `key_prefix` field helps distinguish keys without revealing the full credential. To find other rejections around the same time:
+Search other authentication failures from the same period:
 
 ```powershell
 uv run supportops logs search --event auth.rejected --since 1h
 uv run supportops logs summary --since 1h
 ```
 
-A recurring `revoked_key` reason may point to an integration still using an old key, but confirm the account and rotation history before advising a change.
+A recurring `revoked_key` event may indicate an integration still using an older credential. Correlate the prefix, account, and rotation history before advising a change. See [Authentication troubleshooting](authentication.md) to inspect a credential and its read-only database metadata.
 
-### 400 and 422: Request body problems
+### 400 and 422 — Request body problems
 
-A `400 MALFORMED_REQUEST` indicates that the billing API could not parse the JSON body. Inspect the corresponding `request.invalid_json` event:
+A `400 MALFORMED_REQUEST` means the API could not parse the request body as JSON. Inspect the corresponding `request.invalid_json` event with the included fixture:
 
 ```powershell
 uv run supportops logs trace demo-400 tests\fixtures\logs\billing-api.jsonl
 ```
 
-The fixture includes an event similar to:
-
 ```text
 +0 ms  WARNING  request.invalid_json  Request body is not valid JSON  [validation]
        error_position=1 content_type=application/json content_length=52
-+1 ms  INFO     http.request          POST /v1/customers -> 400 (3 ms)
++1 ms  INFO     http.request         POST /v1/customers -> 400
 ```
 
-The error position and decoder message can help identify a quoting or formatting problem. In Windows PowerShell 5.1, inline JSON passed to a native program can lose its double quotes. Compare the exact bytes sent by the client rather than assuming its source text was transmitted unchanged. See [API errors and request reproduction](api-errors-and-reproduction.md#powershell-51-quoting).
+The error position and decoder details can help identify incorrect quoting or serialization. Windows PowerShell 5.1 can alter quotes passed to native commands, so inspect the bytes the client actually sent rather than relying only on its source code. See [API errors and reproduction](api-errors-and-reproduction.md#powershell-51-quoting).
 
-A `422 VALIDATION_FAILED` means the JSON was parsed, but its fields failed validation:
+A `422 VALIDATION_FAILED` has a different meaning: the JSON was parsed, but one or more fields did not satisfy the endpoint's schema.
 
 ```powershell
 uv run supportops logs trace demo-422 tests\fixtures\logs\billing-api.jsonl
@@ -136,51 +126,51 @@ uv run supportops logs trace demo-422 tests\fixtures\logs\billing-api.jsonl
 ```text
 +0 ms  WARNING  request.validation_failed  Request validation failed  [validation]
        fields=body.email error_types=missing
-+1 ms  INFO     http.request           POST /v1/customers -> 422 (11 ms)
++1 ms  INFO     http.request            POST /v1/customers -> 422
 ```
 
-The log identifies the affected field and the type of validation failure without recording the customer's submitted value.
+The log identifies the field and validation category without including the customer's submitted value.
 
-### 500: An exception during a request
+### 500 — An exception during processing
 
-Use the synthetic fixture to examine a failure without activating the lab's fault injection:
+Use the fixture to inspect an exception associated with a deliberately broken payment flow:
 
 ```powershell
 uv run supportops logs trace demo-500-a tests\fixtures\logs\billing-api.jsonl
 ```
 
-The example contains the following sequence:
+The relevant sequence is:
 
 ```text
-Access log: POST /v1/invoices/inv_juniper_1005/pay -> 500 in 48 ms
+Access log: POST /v1/invoices/inv_juniper_1005/pay -> 500
 Highlights: exception
 
 +0 ms  INFO   payment.recorded      Payment recorded
-+7 ms  ERROR  unhandled_exception  Unhandled exception - InjectedFault: Lab fault payment_partial_commit  [exception]
++7 ms  ERROR  unhandled_exception  InjectedFault: Lab fault payment_partial_commit
        Stack trace:
        Traceback (most recent call last):
        ...
-+9 ms  INFO   http.request         POST /v1/invoices/inv_juniper_1005/pay -> 500 (48 ms)
++9 ms  INFO   http.request         POST /v1/invoices/inv_juniper_1005/pay -> 500
 ```
 
-The key detail is the order: the payment was recorded **before** the error. A `500` does not necessarily mean the operation had no effect. In this deliberately faulty scenario, retrying can create a duplicate payment. Do not advise a retry until the payment and invoice state have been checked.
+**The payment was recorded before the exception.** A `500` does not guarantee that an operation had no side effects. In this synthetic fault scenario, retrying can create a second payment while the invoice remains unpaid. Check invoice and payment records before recommending a retry. See [Database diagnostics](database-diagnostics.md) for read-only consistency checks.
 
-For an engineering escalation, include the request ID, timestamp, status, relevant business events, exception type, and stack trace. Keep factual observations separate from conclusions about the cause.
+For escalation, preserve the request ID, timestamp, HTTP status, relevant business events, exception type, and stack trace. Distinguish what the logs show from any explanation you infer.
 
-### 503: Service or database unavailable
+### 503 — Database unavailable or busy
 
-Search for `db.unavailable`, `db.lock_timeout`, and related entries. Check the `error` category, such as `dns_failure` or `connection_refused`, and compare what the API reports with the direct health checks:
+Start by looking for database-specific events and comparing them with service health:
 
 ```powershell
 uv run supportops logs search --event db.unavailable --since 1h
 uv run supportops health
 ```
 
-Continue with the [service availability runbook](service-availability.md) to distinguish application configuration problems from dependency outages.
+Inspect categories such as `dns_failure` or `connection_refused` and look for `db.lock_timeout` or related timeout events. The [service availability runbook](service-availability.md) helps distinguish a dependency outage from an API configuration problem; [database diagnostics](database-diagnostics.md#investigate-database-sessions-and-locks) covers long transactions and blocking sessions.
 
 ## Find patterns across requests
 
-A summary is useful when the customer cannot provide a request ID or reports an intermittent issue:
+When no request ID is available, begin with a recent summary and narrow the scope:
 
 ```powershell
 uv run supportops logs summary --since 15m
@@ -189,54 +179,49 @@ uv run supportops logs search --status 4xx --path /v1 --since 1h
 uv run supportops logs search --level warning --since 30m
 ```
 
-`logs summary` groups levels, event names, HTTP statuses, recurring warning/error signatures, and the slowest requests. Pattern grouping removes changing IDs and numbers so similar errors can be counted together. Check the example request IDs before treating grouped entries as identical incidents.
+`logs summary` counts severity levels, event names, and HTTP statuses, highlights slow requests, and groups similar warning/error messages. It normalizes variable IDs and numbers to help spot patterns. Grouping is heuristic; compare example request IDs before assuming two events have the same cause.
 
-`logs search` supports filters for request ID, level, event, status, path, text, and time range. Filters can be combined. For example, `--status 4xx` matches client-error responses, and `--event auth.*` matches authentication-related event names. `--level warning` includes warning and more severe levels.
+`logs search` accepts combinable filters for request ID, level, event, status, path, free text, and time range. `--status 4xx` matches client errors, while `--event "auth.*"` matches event names beginning with `auth.`. `--level warning` includes warnings and more severe levels. Results show the newest 50 matches by default, adjustable with `--limit`.
 
-**Use `--path` with `logs search`, not `logs summary`.** A path filter is not part of the summary command's interface.
+**The `--path` filter belongs to `logs search`, not `logs summary`.** Routine `/health` requests can dominate an unfiltered summary, so filter for `/v1` traffic or a relevant status when investigating customer calls.
 
-Relative times include `30s`, `15m`, `2h`, and `1d`; ISO timestamps are also supported. `--since` includes the boundary and `--until` excludes it. Events without usable timestamps cannot be included in a time-filtered result.
+Relative time arguments include `30s`, `15m`, `2h`, and `1d`. ISO timestamps are also supported. `--since` is inclusive, `--until` is exclusive, and entries without usable timestamps are excluded from time-filtered results.
 
-Be aware that routine `GET /health` traffic can dominate an unfiltered summary. Search for `/v1` paths or specific statuses when you need to focus on customer API traffic.
+## Read logs from different sources
 
-## Read logs from Docker, files, or stdin
-
-### Docker containers
+### Docker
 
 ```powershell
 uv run supportops logs summary docker:supportops-billing-api-1 --since 1h
 uv run supportops logs trace ticket-5120 docker:supportops-billing-api-1
 ```
 
-SupportOps invokes `docker logs` directly rather than passing the output through PowerShell. Docker must be available and the container must exist. A stopped container's logs can still be read; a recreated container has its own log history. Docker retrieval is limited to the most recent 100,000 lines.
+SupportOps invokes `docker logs` directly, avoiding PowerShell's text-pipeline encoding issues. Docker must be installed and the named container must exist. Logs from a stopped container are still readable, but a new container has its own log history. Docker reads are limited to the most recent **100,000 lines**.
 
-### Local log files
+### Local files
 
-Save a copy when you need to preserve evidence or examine logs without Docker:
+To save a local copy without changing the running service:
 
 ```powershell
-# Run from the repository root.
-docker compose logs --no-log-prefix billing-api > "$env:TEMP\supportops-billing-api.log"
+docker compose --project-name supportops logs --no-log-prefix billing-api > "$env:TEMP\supportops-billing-api.log"
 uv run supportops logs summary "$env:TEMP\supportops-billing-api.log"
 ```
 
-Windows PowerShell 5.1 normally uses UTF-16 for redirected output. SupportOps detects UTF-8, UTF-8 with BOM, and UTF-16. If another tool requires UTF-8, export with the encoding it supports; PowerShell 5.1's `Out-File -Encoding utf8` writes UTF-8 with a BOM.
-
-Review log files before attaching them to a ticket. The original file is evidence and may contain information that the SupportOps renderer would otherwise mask.
+Windows PowerShell 5.1 commonly writes UTF-16 through output redirection. The log reader recognizes UTF-8, UTF-8 with a BOM, and UTF-16. The raw exported file may contain sensitive content that would be masked in SupportOps' formatted output; review it before attaching it to a ticket.
 
 ### Standard input
 
-Use `-` to read a pipeline:
+Use `-` as the source to consume piped log lines:
 
 ```powershell
-docker compose logs --no-log-prefix billing-api | uv run supportops logs summary -
+docker compose --project-name supportops logs --no-log-prefix billing-api | uv run supportops logs summary -
 ```
 
-PowerShell 5.1 can re-encode text passed between programs, occasionally replacing non-ASCII characters. For logs where exact bytes matter, prefer the direct `docker:` source or a file. SupportOps also recognizes the standard `billing-api-1 |` prefix if you omit `--no-log-prefix`.
+PowerShell 5.1 may re-encode piped text and replace some non-ASCII characters. When exact bytes matter, prefer the `docker:` source or a saved file. SupportOps can also recognize the standard `billing-api-1 |` prefix produced by Docker Compose when log prefixes are enabled.
 
-## Inspect logs without SupportOps
+## Inspect logs with standard command-line tools
 
-For a quick check, standard command-line tools can work with the JSON log entries. Unlike SupportOps' formatted output, these commands do not automatically redact secrets.
+You can perform quick checks without SupportOps, but these commands **do not automatically redact secrets**.
 
 **Windows PowerShell 5.1:**
 
@@ -254,7 +239,7 @@ docker logs supportops-billing-api-1 |
     Group-Object status | Select-Object Name, Count
 ```
 
-`ConvertFrom-Json` reports errors for lines that aren't valid JSON. Logs from services other than the billing API may contain plain-text messages or multiline tracebacks.
+`ConvertFrom-Json` reports errors for lines that are not valid JSON. Other services may emit plain-text logs or multiline stack traces, so these commands may require adjustment.
 
 **Linux/macOS:**
 
@@ -269,13 +254,15 @@ docker logs supportops-billing-api-1 \
   | sort | uniq -c
 ```
 
-## Interpret the evidence carefully
+These Unix examples require `jq` for structured filtering.
 
-- **Missing logs are not proof that nothing happened.** Confirm the source, time window, and request ID before drawing that conclusion.
-- **A status code and a log level are different.** The billing API records HTTP access events at `INFO`, even when the response is `401` or `500`; the related failure may appear in a separate `WARNING` or `ERROR` event.
-- **Timestamps and durations measure different things.** Trace offsets indicate when messages were logged. `duration_ms` is measured in the API, while the time shown by `api request` also includes client and network overhead.
-- **Log summaries depend on their input.** Check the source, coverage period, skipped-line count, and missing timestamps before interpreting totals or error patterns.
-- **Not every input is structured JSON.** Non-JSON lines and very long entries are skipped. SupportOps understands the billing API format and common ECS-style fields; unfamiliar fields remain available as extra details.
-- **Redaction has limits.** SupportOps masks known credential patterns and sensitive fields in its output, but unusual formats may evade detection. Review any excerpt or JSON export before sharing it.
+## Interpret evidence carefully
 
-The logs provide evidence of what was recorded. Combine them with the API response, health checks, and—when available—read-only database checks before deciding what happened or how to resolve it.
+- **No matching log does not prove that nothing happened.** Check the correct source, request ID, time window, and whether the server received the request.
+- **HTTP status and log severity are different.** An access event may be logged at `INFO` even when the response is `401` or `500`. Look for related warning or exception events.
+- **Trace offsets and request durations are different measurements.** Offsets indicate when log lines were written; `duration_ms` comes from the API. A client-side duration includes additional overhead.
+- **A summary is only as complete as its source.** Check the time coverage, skipped lines, and missing timestamps before relying on totals.
+- **Not all log lines are valid structured JSON.** Malformed, incomplete, or oversized entries are counted and skipped. Unrecognized fields are retained as additional details where possible.
+- **Redaction is best-effort.** Recognized credentials and sensitive fields are masked in rendered text and JSON, but unfamiliar secret formats may evade detection.
+
+Combine logs with API responses, service-health observations, and approved read-only database checks before forming a root-cause assessment. For an escalation, include the request ID, timestamps, relevant events, and an explicit note about any missing evidence.

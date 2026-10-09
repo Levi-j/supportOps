@@ -6,7 +6,7 @@ import typer
 from typer.core import TyperGroup
 
 from supportops import __version__, render
-from supportops.cli import api, config, health, logs
+from supportops.cli import api, auth, config, db, health, logs
 from supportops.cli.state import AppState
 from supportops.errors import ExitCode, SupportOpsError
 
@@ -42,6 +42,8 @@ app = typer.Typer(
 app.add_typer(config.app, name="config")
 app.add_typer(api.app, name="api")
 app.add_typer(logs.app, name="logs")
+app.add_typer(db.app, name="db")
+app.add_typer(auth.app, name="auth")
 app.command("health")(health.health)
 
 
