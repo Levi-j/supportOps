@@ -11,6 +11,8 @@ dist/
 .env
 *.env
 
+/reports/
+
 .idea/
 .vscode/
 

@@ -47,6 +47,7 @@ class OpenedSource:
     source: LogSource
     lines: Lines
     notes: list[str] = field(default_factory=list)
+    truncated: bool = False
 
 
 def parse_source(text: str) -> LogSource:
@@ -205,12 +206,13 @@ def _open_docker(source: LogSource, since: datetime | None, runner: Runner) -> O
     while lines and not lines[-1]:
         lines.pop()
     notes = []
-    if len(lines) >= DOCKER_TAIL_LINES:
+    truncated = len(lines) >= DOCKER_TAIL_LINES
+    if truncated:
         notes.append(
             f"Only the last {DOCKER_TAIL_LINES:,} lines of {source.label} were read. "
             "Use --since to look at a shorter period."
         )
-    return OpenedSource(source, iter(lines), notes)
+    return OpenedSource(source, iter(lines), notes, truncated)
 
 
 def _docker_missing(source: LogSource) -> LogSourceError:

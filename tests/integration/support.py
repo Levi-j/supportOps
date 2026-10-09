@@ -1,8 +1,14 @@
-from collections.abc import Callable
+import json
+import socket
+import subprocess
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, LiteralString
 
+import httpx
 import psycopg
 from fastapi.testclient import TestClient
 
@@ -55,3 +61,49 @@ def fetch_all(
 def execute(database: LabDatabase, statement: LiteralString, params: tuple[Any, ...] = ()) -> None:
     with psycopg.connect(database.url("lab_admin")) as connection:
         connection.execute(statement, params)
+
+
+@contextmanager
+def open_transaction(
+    database: LabDatabase, statement: LiteralString, application: str
+) -> Iterator[psycopg.Connection[Any]]:
+    connection = psycopg.connect(database.url("lab_admin"), application_name=application)
+    try:
+        connection.execute(statement)
+        yield connection
+    finally:
+        connection.rollback()
+        connection.close()
+
+
+@dataclass(frozen=True)
+class LiveApi:
+    url: str
+    log_file: Path
+
+    def logs(self) -> list[dict[str, Any]]:
+        lines = self.log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        return [json.loads(line) for line in lines if line.startswith("{")]
+
+
+ApiStarter = Callable[..., LiveApi]
+
+
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def wait_until_live(process: subprocess.Popen[bytes], api: LiveApi) -> None:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"billing-api exited early:\n{api.log_file.read_text()}")
+        try:
+            if httpx.get(f"{api.url}/health", timeout=1).status_code == 200:
+                return
+        except httpx.TransportError:
+            pass
+        time.sleep(0.2)
+    raise RuntimeError("billing-api did not start within 30 seconds")

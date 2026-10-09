@@ -4,6 +4,7 @@ import re
 from collections import Counter
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from typing import NamedTuple
 
 from pydantic import BaseModel, Field
 
@@ -39,6 +40,21 @@ _SKIP_REASONS = {
     "not_an_object": "JSON but not an object",
     "too_long": "longer than the line limit",
 }
+
+
+class ErrorSignature(NamedTuple):
+    level: str | None
+    name: str | None
+    error_type: str | None
+    category: str | None
+    detail: str
+
+    def describe(self) -> str:
+        label = self.name or "(no event name)"
+        if self.category:
+            label += f" ({self.category})"
+        description = f"{self.error_type}: {self.detail}" if self.error_type else self.detail
+        return f"{label}: {description}" if description else label
 
 
 class TimeWindow(BaseModel):
@@ -235,12 +251,27 @@ def normalize_message(text: str) -> str:
     return _NUMBER.sub(_number_placeholder, text)
 
 
+def is_warning_or_error(event: LogEvent) -> bool:
+    rank = level_rank(event.level)
+    return (rank is not None and rank >= LEVEL_RANKS["WARNING"]) or bool(event.error_type)
+
+
+def error_signature(event: LogEvent) -> ErrorSignature:
+    return ErrorSignature(
+        level=event.level,
+        name=event.event_name or event.logger,
+        error_type=event.error_type,
+        category=_category(event),
+        detail=normalize_message(redact_text(event.error_message or event.message or "")),
+    )
+
+
 def summarize(log_input: LogInput, window: TimeWindow, top: int = TOP_ITEMS) -> LogSummary:
     stats = log_input.stats
     levels: Counter[str] = Counter()
     names: Counter[str] = Counter()
     statuses: Counter[int] = Counter()
-    patterns: dict[tuple[str | None, ...], ErrorPattern] = {}
+    patterns: dict[ErrorSignature, ErrorPattern] = {}
     slowest: list[tuple[float, int, RequestTiming]] = []
     entries = access_logs = without_timestamp = 0
     first_seen: datetime | None = None
@@ -422,28 +453,21 @@ def _searchable(event: LogEvent) -> str:
     return "\n".join(part for part in parts if part).lower()
 
 
-def _record_pattern(patterns: dict[tuple[str | None, ...], ErrorPattern], event: LogEvent) -> None:
-    rank = level_rank(event.level)
-    if not ((rank is not None and rank >= LEVEL_RANKS["WARNING"]) or event.error_type):
+def _record_pattern(patterns: dict[ErrorSignature, ErrorPattern], event: LogEvent) -> None:
+    if not is_warning_or_error(event):
         return
-    category = _category(event)
-    detail = normalize_message(redact_text(event.error_message or event.message or ""))
-    key = (event.level, event.event_name or event.logger, event.error_type, category, detail)
-    pattern = patterns.get(key)
+    signature = error_signature(event)
+    pattern = patterns.get(signature)
     if pattern is None:
-        label = event.event_name or event.logger or "(no event name)"
-        if category:
-            label += f" ({category})"
-        description = f"{event.error_type}: {detail}" if event.error_type else detail
         pattern = ErrorPattern(
-            pattern=f"{label}: {description}" if description else label,
+            pattern=signature.describe(),
             level=event.level,
             event_name=event.event_name,
             error_type=event.error_type,
-            category=category,
+            category=signature.category,
             count=0,
         )
-        patterns[key] = pattern
+        patterns[signature] = pattern
     pattern.count += 1
     if event.timestamp is not None:
         pattern.first_seen = min(pattern.first_seen or event.timestamp, event.timestamp)

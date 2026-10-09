@@ -1,7 +1,11 @@
+import os
+import subprocess
+import sys
 import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, LiteralString
 
 import psycopg
@@ -19,8 +23,12 @@ from tests.integration.support import (
     POSTGRES_IMAGE,
     SQL_DIR,
     TEMPLATE_DATABASE,
+    ApiStarter,
     ClientFactory,
     LabDatabase,
+    LiveApi,
+    free_port,
+    wait_until_live,
 )
 
 
@@ -76,6 +84,55 @@ def make_client(billing_db: LabDatabase) -> Iterator[ClientFactory]:
 @pytest.fixture
 def client(make_client: ClientFactory) -> TestClient:
     return make_client()
+
+
+@pytest.fixture
+def start_api(tmp_path: Path) -> Iterator[ApiStarter]:
+    processes: list[subprocess.Popen[bytes]] = []
+
+    def start(database_url: str, **settings: str) -> LiveApi:
+        port = free_port()
+        api = LiveApi(url=f"http://127.0.0.1:{port}", log_file=tmp_path / f"api-{port}.log")
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if not name.upper().startswith("BILLING_")
+        }
+        environment |= {
+            "BILLING_DATABASE_URL": database_url,
+            "BILLING_ENV": "lab",
+            "BILLING_DB_CONNECT_TIMEOUT_SECONDS": "1",
+            **{f"BILLING_{name.upper()}": value for name, value in settings.items()},
+        }
+        command = [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "--factory",
+            "billing_api.main:create_app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--no-access-log",
+        ]
+        with api.log_file.open("wb") as output:
+            process = subprocess.Popen(  # noqa: S603
+                command, env=environment, stdout=output, stderr=subprocess.STDOUT
+            )
+        processes.append(process)
+        wait_until_live(process, api)
+        return api
+
+    yield start
+    for process in processes:
+        process.terminate()
+        process.wait(timeout=10)
+
+
+@pytest.fixture
+def live_api(start_api: ApiStarter, billing_db: LabDatabase) -> LiveApi:
+    return start_api(billing_db.url("billing_app"))
 
 
 def _admin(database: LabDatabase, template: LiteralString, *names: str) -> None:

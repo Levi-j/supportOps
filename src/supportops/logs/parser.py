@@ -70,6 +70,7 @@ class InputStats(BaseModel):
     naive_timestamps: int = 0
     outside_window: int = 0
     excluded_without_timestamp: int = 0
+    truncated_sources: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
     @property
@@ -175,6 +176,8 @@ def _events(opened: list[OpenedSource], stats: InputStats) -> Iterator[LogEvent]
     for source in opened:
         stats.notes.extend(source.notes)
         label = source.source.label
+        if source.truncated:
+            stats.truncated_sources.append(label)
         try:
             for number, line in enumerate(source.lines, start=1):
                 stats.lines += 1

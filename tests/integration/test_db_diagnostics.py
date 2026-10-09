@@ -4,7 +4,6 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from typing import Any, LiteralString
 
 import psycopg
@@ -19,7 +18,7 @@ from supportops.db.connection import DatabaseError, read_only_session
 from supportops.db.runner import DbReport, plan_checks, run_checks
 from supportops.errors import ExitCode
 from supportops.settings import Settings
-from tests.integration.support import LabDatabase, execute, fetch_all
+from tests.integration.support import LabDatabase, execute, fetch_all, open_transaction
 
 pytestmark = pytest.mark.integration
 
@@ -50,19 +49,6 @@ def wait_for(condition: Callable[[], bool], what: str) -> None:
         if time.monotonic() > deadline:
             raise AssertionError(f"timed out waiting for {what}")
         time.sleep(0.1)
-
-
-@contextmanager
-def open_transaction(
-    database: LabDatabase, statement: LiteralString, application: str
-) -> Iterator[psycopg.Connection[Any]]:
-    connection = psycopg.connect(database.url("lab_admin"), application_name=application)
-    try:
-        connection.execute(statement)
-        yield connection
-    finally:
-        connection.rollback()
-        connection.close()
 
 
 def test_every_check_passes_on_the_clean_seed(billing_db: LabDatabase) -> None:

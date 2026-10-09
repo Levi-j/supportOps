@@ -776,6 +776,7 @@ The runbooks provide fuller procedures, including PowerShell and Linux examples:
 - [Logs and request IDs](docs/runbooks/logs-and-request-ids.md) covers reading structured logs, following one request, and investigating 401, 400/422 and 500 errors.
 - [Database diagnostics](docs/runbooks/database-diagnostics.md) explains the SQL check catalog, invoice and payment consistency, long transactions, and lock contention.
 - [Authentication](docs/runbooks/authentication.md) covers API-key failures, 401 and 403 responses, and how to confirm a rejection using logs.
+- [Triage and escalation](docs/runbooks/triage-and-escalation.md) covers assessing incident impact, collecting evidence, escalating issues, and preparing customer updates.
 
 ## Investigating logs
 
@@ -926,6 +927,81 @@ The corresponding `auth.rejected` event can identify a missing header, malformed
 
 See the [authentication runbook](docs/runbooks/authentication.md) for a step-by-step investigation, common configuration mistakes, and guidance on handling credentials safely.
 
+## Guided investigation
+
+When a customer reports a failed API request, the request ID is a useful starting point. `supportops investigate` brings together the relevant logs, read-only database checks, and initial troubleshooting findings so the engineer can work from a single evidence trail.
+
+To investigate a request using the configured log source:
+
+```powershell
+uv run supportops investigate REQUEST_ID
+```
+
+You can also investigate saved logs without querying a database. This example uses a request from the repository's sample log file:
+
+```powershell
+uv run supportops investigate demo-400 tests/fixtures/logs/billing-api.jsonl --no-db
+```
+
+The command reconstructs the request timeline, identifies relevant account and billing references, and selects diagnostic checks based on what the logs contain. For example, an authentication rejection can trigger an API-key status lookup, while an invoice-related payment failure can trigger a scoped invoice lookup and consistency checks. Database error events can also prompt service-health checks. No customer request is replayed.
+
+### Findings and supporting evidence
+
+Findings reference numbered evidence items (`E1`, `E2`, and so on), making it possible to check how each conclusion was reached. The confidence label reflects the strength of that evidence:
+
+| Confidence | What it means |
+|---|---|
+| `confirmed` | The request's server-side events identify the cause, the recorded HTTP status agrees, and no evidence contradicts it. |
+| `likely` | There is a direct indication of the cause, but part of the supporting evidence is missing or only reflects current conditions. |
+| `possible` | The available signals suggest a cause without establishing it directly. |
+
+Conflicting evidence lowers confidence and is called out explicitly. If the request cannot be found or the available information doesn't support a finding, the result is `INCONCLUSIVE` rather than an invented root cause.
+
+The distinction between historical and current evidence matters. Logs describe the request as it happened; a database lookup describes the state of the data **when the investigation runs**. A key that is active now, for example, may have been revoked when the original request failed. The output keeps these observations separate from interpretations and suggested next steps.
+
+### Assessing impact
+
+For each relevant error pattern, SupportOps examines the 15 minutes before and after the investigated request and counts distinct request IDs and accounts, rather than counting every log entry as a separate failure.
+
+The result also describes **log coverage**. If the window extends beyond the available logs, a source was truncated, lines were skipped, or the search was restricted by a time filter, the counts are treated as minimums. Incomplete coverage cannot support an `isolated` conclusion; the scope remains `undetermined` unless other affected requests are actually observed.
+
+Impact estimates apply only to the sources examined. They are useful for initial triage, but they are not a service-wide incident metric.
+
+### Options and report drafts
+
+| Option | Purpose |
+|---|---|
+| `[SOURCE]...` | Read from explicit log files, stdin, or Docker instead of the configured source. |
+| `--since`, `--until` | Restrict which log entries are considered. |
+| `--no-db` | Skip database queries. |
+| `--json` | Return the investigation as structured JSON. |
+| `--report FILE` | Write a Markdown incident-report draft. |
+
+For example, to save a draft based on the sample malformed-JSON request:
+
+```powershell
+uv run supportops investigate demo-400 tests/fixtures/logs/billing-api.jsonl --no-db --report reports/demo-400.md
+```
+
+The draft includes the request summary, findings, timeline, evidence, observed impact, outstanding questions, and recommended next steps or escalation. It is clearly marked for human review, and the command refuses to overwrite an existing report. The generated `reports/` directory is excluded from Git.
+
+The report writer applies secret redaction and checks for configured credentials before writing, but generated reports still need review before they are shared. In particular, investigation data may contain internal account details that should not appear in a customer-facing update.
+
+### Safety and limitations
+
+`investigate` does not modify the target database. It uses only predefined, parameterized, read-only SQL checks; its HTTP probes are limited to unauthenticated `GET /health` and `GET /health/ready` requests. It does not send the configured API key or repeat the customer's original request.
+
+`--no-db` disables database queries, **not all network access**: logs showing database failures can still trigger health GETs to the configured API. Keep that in mind when investigating historical logs against a live environment. Redaction is also a safeguard rather than a substitute for reviewing sensitive output.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | One or more findings were produced. |
+| `1` | The investigation was inconclusive. |
+| `2` | Invalid input or an existing report destination. |
+| `3` | A required log source could not be read, or the report failed its secret check. |
+
+For a full triage workflow, including severity, escalation, and customer updates, see the [triage and escalation runbook](docs/runbooks/triage-and-escalation.md). Use the [incident report template](docs/incidents/TEMPLATE.md) when preparing a reviewed incident write-up.
+
 ## Development
 
 SupportOps uses:
@@ -967,6 +1043,8 @@ The log sources are tested the same way: a short-lived container prints log line
 
 Database diagnostics are tested against those disposable PostgreSQL instances. The tests introduce invoice and payment discrepancies, create blocked sessions, and check read-only enforcement under both restricted and privileged roles. They also verify how diagnostics behave when monitoring access is limited. None of these tests changes the persistent local lab.
 
+Guided investigation tests exercise authentication failures, malformed requests, payment inconsistencies, lock contention, and database connectivity problems against disposable API and PostgreSQL instances. They verify the findings and evidence, including that running an investigation does not alter application data.
+
 ### Code quality checks
 
 Run Ruff's linting checks:
@@ -998,6 +1076,7 @@ src/
 └── supportops/             # Main SupportOps CLI
     ├── cli/                # Commands and CLI entry points
     ├── db/                 # Predefined, read-only PostgreSQL checks
+    ├── investigation/      # Request evidence, diagnostic rules and report drafts
     ├── logs/               # Log sources, parsing, summaries, search and request traces
     ├── auth_checks.py      # API-key validation and authentication diagnostics
     ├── health.py           # Service health checks and verdicts
@@ -1025,9 +1104,10 @@ lab/
         └── ...             # Settings, logging, middleware, health checks
 docs/
 ├── examples/               # Example JSON request bodies
+├── incidents/              # Incident report template
 └── runbooks/               # Step-by-step troubleshooting guides
 tests/
-├── fixtures/               # Sample logs, including malformed lines and planted fake secrets
+├── fixtures/               # Sample logs and golden report fixtures
 ├── unit/                   # CLI and API unit tests
 └── integration/            # PostgreSQL, API and Docker integration tests
 compose.yaml                # Local PostgreSQL and billing API services
@@ -1043,4 +1123,4 @@ The API's Docker image is built to include only the packages the service needs, 
 
 ## Next steps
 
-SupportOps can now examine API responses, service health, structured logs, PostgreSQL state, and API-key failures independently. The next area of work is guided investigation: correlating that evidence into a clear account of what happened, what remains uncertain, and when an issue should be escalated.
+SupportOps now combines API, log, authentication, and PostgreSQL evidence in a guided investigation, with explicit confidence levels and a reviewable report draft. The next milestone will add reproducible incident scenarios and documented case studies that show the full path from a customer report to diagnosis and escalation.

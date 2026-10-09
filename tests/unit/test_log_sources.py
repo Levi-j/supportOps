@@ -196,6 +196,14 @@ def test_docker_tail_limit_is_reported(
 
     assert len(opened.notes) == 1
     assert opened.notes[0].startswith("Only the last 2 lines of docker:billing were read.")
+    assert opened.truncated is True
+
+
+def test_docker_below_the_tail_limit_is_not_truncated(docker_installed: None) -> None:
+    opened = open_source(LogSource("docker", "billing"), runner=FakeRunner(stdout=b"a\nb\n"))
+
+    assert opened.notes == []
+    assert opened.truncated is False
 
 
 def test_missing_docker_executable(monkeypatch: pytest.MonkeyPatch) -> None:

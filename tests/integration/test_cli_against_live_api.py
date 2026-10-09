@@ -1,15 +1,6 @@
 import json
-import os
-import socket
-import subprocess
-import sys
-import time
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-import httpx
 import pytest
 from typer.testing import CliRunner, Result
 
@@ -17,94 +8,16 @@ from supportops.cli.main import app
 from tests.integration.support import (
     JUNIPER_KEY,
     JUNIPER_REVOKED_KEY,
+    ApiStarter,
     LabDatabase,
+    LiveApi,
     fetch_all,
+    free_port,
 )
 
 pytestmark = pytest.mark.integration
 
 runner = CliRunner()
-
-
-@dataclass(frozen=True)
-class LiveApi:
-    url: str
-    log_file: Path
-
-    def logs(self) -> list[dict[str, Any]]:
-        lines = self.log_file.read_text(encoding="utf-8", errors="replace").splitlines()
-        return [json.loads(line) for line in lines if line.startswith("{")]
-
-
-ApiStarter = Callable[[str], LiveApi]
-
-
-def free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
-
-
-@pytest.fixture
-def start_api(tmp_path: Path) -> Iterator[ApiStarter]:
-    processes: list[subprocess.Popen[bytes]] = []
-
-    def start(database_url: str) -> LiveApi:
-        port = free_port()
-        api = LiveApi(url=f"http://127.0.0.1:{port}", log_file=tmp_path / f"api-{port}.log")
-        environment = {
-            name: value
-            for name, value in os.environ.items()
-            if not name.upper().startswith("BILLING_")
-        }
-        environment |= {
-            "BILLING_DATABASE_URL": database_url,
-            "BILLING_ENV": "lab",
-            "BILLING_DB_CONNECT_TIMEOUT_SECONDS": "1",
-        }
-        command = [
-            sys.executable,
-            "-m",
-            "uvicorn",
-            "--factory",
-            "billing_api.main:create_app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--no-access-log",
-        ]
-        with api.log_file.open("wb") as output:
-            process = subprocess.Popen(  # noqa: S603
-                command, env=environment, stdout=output, stderr=subprocess.STDOUT
-            )
-        processes.append(process)
-        _wait_until_live(process, api)
-        return api
-
-    yield start
-    for process in processes:
-        process.terminate()
-        process.wait(timeout=10)
-
-
-@pytest.fixture
-def live_api(start_api: ApiStarter, billing_db: LabDatabase) -> LiveApi:
-    return start_api(billing_db.url("billing_app"))
-
-
-def _wait_until_live(process: subprocess.Popen[bytes], api: LiveApi) -> None:
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise RuntimeError(f"billing-api exited early:\n{api.log_file.read_text()}")
-        try:
-            if httpx.get(f"{api.url}/health", timeout=1).status_code == 200:
-                return
-        except httpx.TransportError:
-            pass
-        time.sleep(0.2)
-    raise RuntimeError("billing-api did not start within 30 seconds")
 
 
 def invoke(api_url: str, *args: str, **env: str) -> Result:
